@@ -1,0 +1,6 @@
+outs:
+- md5: ecfc5efc5c23f2864ff56c89e17c884f.dir
+  size: 25767
+  nfiles: 2
+  hash: md5
+  path: dates

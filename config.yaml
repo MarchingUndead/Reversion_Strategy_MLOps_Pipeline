@@ -1,0 +1,99 @@
+# config.yaml — Single source of truth.
+# All paths relative to DATA_ROOT env var (default: ./data)
+
+data_backend: "file"   # "file" now, "kdb" later
+
+paths:
+  # Futures and equity CSVs coexist in the same directories.
+  # Scanner differentiates by filename pattern:
+  #   futures: {SYMBOL}{YY}{MMM}FUT.csv
+  #   equity:  {SYMBOL}.csv
+  raw_futures:
+    - "data/raw/2025"
+    - "data/raw/2022-24"
+
+  raw_equity:
+    - "data/raw/2025"
+    - "data/raw/2022-24"
+
+  raw_vix:
+    - "data/raw/2025/INDIAVIX.csv"
+    - "data/raw/2022-24/INDIAVIX.csv"
+
+  processed: "data/processed"
+  dist_tables: "data/dist_tables"
+
+  expiry_csv: "data/raw/dates/expiry_dates.csv"
+  trading_csv: "data/raw/dates/trading_calendar.csv"
+
+# kdb+ stub (future)
+kdb:
+  host: "localhost"
+  port: 5000
+  auth: null
+
+symbols: ["RELIANCE", "BAJFINANCE"]
+year_filter: null
+candle_intervals: [1, 2]
+
+time_buckets:
+  - ["09:15-10:00", "09:15", "10:00"]
+  - ["10:00-11:00", "10:00", "11:00"]
+  - ["11:00-12:00", "11:00", "12:00"]
+  - ["12:00-13:00", "12:00", "13:00"]
+  - ["13:00-14:00", "13:00", "14:00"]
+  - ["14:00-15:00", "14:00", "15:00"]
+  - ["15:00-15:30", "15:00", "15:30"]
+
+detection:
+  z_thresh: 1.8
+  event_exit_threshold: 0.3
+  z_match_band: 0.5
+  sigma_floor: 0.005
+
+distributions:
+  families: ["normal", "t", "skewnorm", "lognorm"]
+  min_obs: 5
+  dte_window: 5
+  recalib_min: 10
+  overwrite: true
+
+vix:
+  gate_max: 20.0
+  strict: true
+  rolling_1m: 22
+  rolling_1y: 252
+
+features:
+  oi_lookback: 10
+  momentum_lookback: 5
+
+regression:
+  mode: "live"
+  model_type: "ridge"
+  alpha: 1.0
+
+training:
+  holdout_year: 25
+  min_train_months: 6
+  classifier:
+    n_estimators: 200
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+  regressor:
+    n_estimators: 200
+    max_depth: 5
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+
+live:
+  date: "2026-03-16"
+  eod_time: "15:30"
+  feed_path: "live_ticks.json"
+
+save:
+  format: "parquet"
+  overwrite: true

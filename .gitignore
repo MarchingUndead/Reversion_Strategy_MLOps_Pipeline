@@ -1,0 +1,21 @@
+# Data contents (DVC-tracked, not Git)
+/data/raw/2025/
+/data/raw/2022-24/
+/data/raw/dates/
+/data/processed/
+/data/dist_tables/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Logs
+/logs/*.log
+
+# MLflow
+/mlruns/
+
+# Environment
+.env
+.venv/
