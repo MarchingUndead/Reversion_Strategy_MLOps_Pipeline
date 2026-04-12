@@ -1,43 +1,34 @@
 """
-preprocess.py — Builds distribution and reversion tables from raw tick CSVs.
+preprocess.py — Tick CSVs -> distribution lookup + RAW events table.
 
-Processes one contract at a time to stay within memory budget.
+Pipeline:
+  1. Build (dte, bucket) spread distribution per symbol (weighted moments).
+  2. Per session: z-score each tick against its (dte, bucket) cell.
+  3. Detect outliers (|z| >= z_thresh). Multi-event per session via cooldown
+     that walks past the entire elevated regime before re-arming.
+  4. Forward-scan each event up to reversion_window_min, tracking BOTH:
+       - most_reverted: min |z| during window  (for reversion classification)
+       - most_extended: max |z| during window  (for continuation classification)
+  5. Attach features (features.attach_features) AT DETECTION ONLY.
+  6. Save raw events WITHOUT classification — label_events.py applies labels.
 
-Pass 1: accumulate (dte, bucket) spread groups across contracts → fit distributions
-Pass 2: scan each contract's sessions with two pointers for outlier events
-
-Memory-optimised CSV reading:
-  read_raw_csv() uses chunked reading (default 200k rows per chunk) so that
-  large tick files (often >10M rows) never materialise fully in RAM.
-  load_equity() likewise concatenates chunks lazily.
-
-Outputs:
-  data/processed/distributions/{SYMBOL}_dist.parquet
-  data/processed/reversion/{SYMBOL}_reversion.parquet
+Output:
+  data/processed/distributions/{SYM}_dist.parquet
+  data/processed/reversion/{SYM}_reversion.parquet  (raw, unlabeled)
 """
-
-import re
-import json
-import argparse
-import warnings
-import yaml
+import re, argparse, logging, warnings
+from pathlib import Path
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from scipy.stats import norm, t as t_dist, skewnorm, lognorm, kstest
+import yaml
 
 from calendars import compute_dte, get_contract_expiry, get_time_bucket
+from features import attach_features
 
 warnings.filterwarnings("ignore")
 
-DIST_MAP    = {"normal": norm, "t": t_dist, "skewnorm": skewnorm, "lognorm": lognorm}
-FUTURES_RE  = re.compile(r"^([A-Z&]+)(\d{2}[A-Z]{3})FUT\.csv$", re.IGNORECASE)
-SESSION_START = 9 * 60 + 15
-SESSION_LEN   = 375
-
-# Default chunk size for CSV reading — tune based on available RAM.
-# 200k rows ≈ 30–50 MB per chunk for a 5-column tick file.
-CSV_CHUNK_SIZE = 200_000
+FUTURES_RE = re.compile(r"^([A-Z&]+)(\d{2}[A-Z]{3})FUT\.csv$", re.IGNORECASE)
+CHUNKSIZE = 500_000
 
 
 def load_config(path="config.yaml"):
@@ -45,436 +36,329 @@ def load_config(path="config.yaml"):
         return yaml.safe_load(f)
 
 
-def load_calendars(cfg):
-    expiry_df = pd.read_csv(cfg["paths"]["expiry_csv"])
-    col = next((c for c in expiry_df.columns if "expiry" in c.lower() or "date" in c.lower()), None)
-    if col is None:
-        raise ValueError("expiry_csv: no date/expiry column found")
-    expiry_dates = sorted(pd.to_datetime(expiry_df[col]).unique())
-    trading_df   = pd.read_csv(cfg["paths"]["trading_csv"], parse_dates=["date"])
-    trading_days = pd.DatetimeIndex(sorted(trading_df["date"]))
-    return expiry_dates, trading_days
-
-
-def _detect_csv_columns(path):
-    """Peek at the first line to determine column count without loading the file."""
-    with open(path, "r") as f:
-        first_line = f.readline()
-    # Try common separators
-    for sep in [",", "\t", ";", "|"]:
-        if sep in first_line:
-            return len(first_line.split(sep)), sep
-    return len(first_line.split(",")), ","
-
-
-def read_raw_csv(path, chunksize=CSV_CHUNK_SIZE):
-    """Read a headerless tick CSV in chunks and return a single DataFrame.
-
-    Chunked reading ensures that a 2 GB tick file never sits entirely in
-    RAM — each chunk is parsed, trimmed to the columns we need, and
-    appended to a list.  The final concat is on the slim (4–5 column)
-    frames, not the raw text.
-    """
-    ncols, sep = _detect_csv_columns(path)
-
-    if ncols < 5:
-        raise ValueError(f"{path}: expected >=5 columns, got {ncols}")
-
-    base = ["date", "time", "price", "volume", "oi"]
-    if ncols == 9:
-        extra = ["bid_price", "bid_volume", "ask_price", "ask_volume"]
-    else:
-        extra = [f"_x{i}" for i in range(ncols - 5)]
-    col_names = base + extra
-
-    keep = ["timestamp", "price", "volume", "oi"]
-    if ncols >= 9:
-        keep += ["bid_price", "ask_price"]
-
+def read_raw_csv(path):
+    probe = pd.read_csv(path, sep=None, engine="python", header=None, nrows=1)
+    n = len(probe.columns)
+    if n < 5:
+        raise ValueError(f"{path}: expected >=5 cols, got {n}")
+    base  = ["date", "time", "price", "volume", "oi"]
+    extra = (["bid_price","bid_volume","ask_price","ask_volume"]
+             if n == 9 else [f"_x{i}" for i in range(n-5)])
     parts = []
-    reader = pd.read_csv(
-        path, sep=sep, engine="c", header=None,
-        names=col_names, chunksize=chunksize,
-    )
-
-    for chunk in reader:
+    for chunk in pd.read_csv(path, sep=",", engine="c", header=None,
+                             chunksize=CHUNKSIZE, low_memory=True):
+        chunk.columns = base + extra
         chunk["timestamp"] = pd.to_datetime(
             pd.to_datetime(chunk["date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d")
-            + " " + chunk["time"].astype(str)
-        )
-        parts.append(chunk[keep].copy())
-
-    if not parts:
-        raise ValueError(f"{path}: file is empty")
-
-    return pd.concat(parts, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
+            + " " + chunk["time"].astype(str))
+        keep = ["timestamp","price","volume","oi"]
+        if n >= 9: keep += ["bid_price","ask_price"]
+        parts.append(chunk[keep])
+    df = pd.concat(parts, ignore_index=True); del parts
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def load_equity(equity_paths, chunksize=CSV_CHUNK_SIZE):
-    """Load and concatenate equity tick files, reading each in chunks."""
+def load_equity(paths):
     parts = []
-    for p in equity_paths:
+    for p in paths:
         try:
-            df = read_raw_csv(p, chunksize=chunksize)[["timestamp", "price"]]
-            df = df.rename(columns={"price": "cash_price"})
-            parts.append(df)
-        except Exception:
-            continue
-
-    if not parts:
-        raise RuntimeError("No readable equity files")
-
+            parts.append(read_raw_csv(p)[["timestamp","price"]]
+                         .rename(columns={"price":"cash_price"}))
+        except Exception: continue
+    if not parts: return None
     return (pd.concat(parts, ignore_index=True)
-              .sort_values("timestamp")
-              .drop_duplicates("timestamp", keep="last"))
+            .sort_values("timestamp")
+            .drop_duplicates("timestamp", keep="last")
+            .reset_index(drop=True))
 
 
 def load_vix_daily(vix_paths, rolling_window):
     paths = [Path(p) for p in (vix_paths if isinstance(vix_paths, list) else [vix_paths])]
     parts = []
     for p in paths:
-        if not p.exists():
-            continue
-        df = pd.read_csv(p, sep=None, engine="python", header=None,
-                         names=["date", "time", "vix", "volume", "oi"])
-        df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
-        df["vix"]  = pd.to_numeric(df["vix"], errors="coerce")
-        parts.append(df.dropna(subset=["vix"]))
-    if not parts:
-        return None
+        if not p.exists(): continue
+        for chunk in pd.read_csv(p, sep=",", engine="c", header=None,
+                                 names=["date","time","vix","volume","oi"],
+                                 chunksize=CHUNKSIZE):
+            chunk["date"] = pd.to_datetime(chunk["date"].astype(str), format="%Y%m%d")
+            chunk["vix"]  = pd.to_numeric(chunk["vix"], errors="coerce")
+            parts.append(chunk[["date","time","vix"]].dropna(subset=["vix"]))
+    if not parts: return None
     df = pd.concat(parts, ignore_index=True)
-    daily = (df.sort_values(["date", "time"])
-               .groupby("date")["vix"].last()
-               .rename("vix_close").to_frame())
-    # shift(1): rolling mean for day D uses only days < D
+    daily = (df.sort_values(["date","time"]).groupby("date")["vix"].last()
+             .rename("vix_close").to_frame())
     daily["vix_rolling"] = daily["vix_close"].rolling(rolling_window, min_periods=5).mean().shift(1)
     return daily
 
 
 def scan_symbol_files(cfg, symbol):
-    futures_dirs = [Path(p) for p in cfg["paths"]["raw_futures"] if Path(p).exists()]
-    equity_dirs  = [Path(p) for p in cfg["paths"]["raw_equity"]  if Path(p).exists()]
-
-    equity_paths = [str(f) for d in equity_dirs for f in d.glob(f"{symbol}.csv")]
-    if not equity_paths:
-        raise FileNotFoundError(f"No equity CSV for {symbol}")
-
+    fut_dirs = [Path(p) for p in cfg["paths"]["raw_futures"] if Path(p).exists()]
+    eq_dirs  = [Path(p) for p in cfg["paths"]["raw_equity"]  if Path(p).exists()]
+    eq_paths = [str(f) for d in eq_dirs for f in d.glob(f"{symbol}.csv")]
+    if not eq_paths: raise FileNotFoundError(f"No equity CSV for {symbol}")
     contracts, seen = [], set()
-    for d in futures_dirs:
+    for d in fut_dirs:
         for f in sorted(d.glob("*.csv")):
             m = FUTURES_RE.match(f.name)
-            if not m or m.group(1).upper() != symbol:
-                continue
+            if not m or m.group(1).upper() != symbol: continue
             c = m.group(2).upper()
             if c not in seen:
-                seen.add(c)
-                contracts.append((c, str(f)))
-
-    if not contracts:
-        raise FileNotFoundError(f"No futures CSVs for {symbol}")
-    return sorted(contracts), equity_paths
+                seen.add(c); contracts.append((c, str(f)))
+    if not contracts: raise FileNotFoundError(f"No futures CSVs for {symbol}")
+    return sorted(contracts), eq_paths
 
 
-def _merge_contract(fut_path, eq_df, expiry, trading_days, time_buckets, contract):
-    """Load one futures file, merge with equity slice, return slim tick DataFrame."""
-    fut = read_raw_csv(fut_path).rename(columns={"price": "futures_price"})
-
-    # slice equity to contract date range to minimise merge_asof work
-    date_min = fut["timestamp"].min() - pd.Timedelta(days=1)
-    date_max = fut["timestamp"].max() + pd.Timedelta(days=1)
-    eq_slice = eq_df[(eq_df["timestamp"] >= date_min) & (eq_df["timestamp"] <= date_max)]
-
-    base = pd.merge_asof(
-        fut.sort_values("timestamp"),
-        eq_slice.sort_values("timestamp"),
-        on="timestamp", direction="backward"
-    ).dropna(subset=["cash_price"])
-
-    if base.empty:
-        return None
-
-    base["spread"]   = (base["futures_price"] - base["cash_price"]) / base["cash_price"].replace(0, np.nan) * 100
-    base["date"]     = base["timestamp"].dt.normalize()
-    base["dte"]      = compute_dte(base["date"], expiry, trading_days)
+def merge_contract(fut_path, eq_df, expiry, trading_days, time_buckets, contract):
+    fut = read_raw_csv(fut_path).rename(columns={"price":"futures_price"})
+    d0, d1 = fut["timestamp"].min()-pd.Timedelta(days=1), fut["timestamp"].max()+pd.Timedelta(days=1)
+    eq = eq_df[(eq_df["timestamp"]>=d0)&(eq_df["timestamp"]<=d1)]
+    base = pd.merge_asof(fut.sort_values("timestamp"), eq.sort_values("timestamp"),
+                         on="timestamp", direction="backward").dropna(subset=["cash_price"])
+    if base.empty: return None
+    base["spread"] = (base["futures_price"]-base["cash_price"])/base["cash_price"].replace(0,np.nan)*100
+    base["date"] = base["timestamp"].dt.normalize()
+    base["dte"]  = compute_dte(base["date"], expiry, trading_days)
     base["contract"] = contract
-    base["bucket"]   = base["timestamp"].map(lambda ts: get_time_bucket(ts, time_buckets))
+    base["bucket"] = base["timestamp"].map(lambda t: get_time_bucket(t, time_buckets))
     base = base.set_index("timestamp").sort_index()
     base = base[~base.index.duplicated(keep="last")]
-    return base.dropna(subset=["dte", "spread"])
+    return base.dropna(subset=["dte","spread"])
 
 
 def build_distributions(symbol, contracts, eq_df, expiry_dates, trading_days, cfg, log):
-    """Accumulate (dte, bucket) groups one contract at a time, then fit distributions."""
-    min_obs      = cfg["distributions"]["min_obs"]
-    families     = cfg["distributions"]["families"]
-    time_buckets = cfg["time_buckets"]
-
-    # groups[(dte, bucket)] = {"spreads": [...], "volumes": [...]}
+    min_obs = cfg["distributions"]["min_obs"]
+    tb = cfg["time_buckets"]
+    # LEAKAGE FIX: build (dte, bucket) μ/σ from TRAIN years only. The
+    # holdout year's ticks must never inform what "normal" looks like,
+    # otherwise z-scores (and therefore detection, reversion_frac, and
+    # dte_bucket_n_obs) are softly contaminated by the future.
+    holdout_yy = int(cfg["training"]["holdout_year"])
     groups = {}
-
-    for contract, fut_path in contracts:
-        expiry = get_contract_expiry(contract, expiry_dates)
-        if expiry is None:
-            continue
-        try:
-            df = _merge_contract(fut_path, eq_df, expiry, trading_days, time_buckets, contract)
-        except Exception as e:
-            log.warning(f"  [{contract}] skipped: {e}")
-            continue
-        if df is None:
-            continue
-
-        for (dte, bucket), grp in df.groupby(["dte", "bucket"]):
-            if bucket is None:
-                continue
-            key = (int(dte), bucket)
-            spreads = grp["spread"].dropna().values
-            volumes = grp["volume"].clip(lower=0).fillna(1).values
-            if key not in groups:
-                groups[key] = {"spreads": [], "volumes": []}
-            groups[key]["spreads"].extend(spreads.tolist())
-            groups[key]["volumes"].extend(volumes.tolist())
-
+    n_dropped = 0
+    for contract, fp in contracts:
+        exp = get_contract_expiry(contract, expiry_dates)
+        if exp is None: continue
+        try: df = merge_contract(fp, eq_df, exp, trading_days, tb, contract)
+        except Exception as e: log.warning(f"  [{contract}] {e}"); continue
+        if df is None: continue
+        before = len(df)
+        df = df[df.index.year % 100 != holdout_yy]
+        n_dropped += before - len(df)
+        if df.empty: continue
+        for (dte,bk), grp in df.groupby(["dte","bucket"]):
+            if bk is None: continue
+            k = (int(dte), bk)
+            if k not in groups: groups[k] = {"s":[], "v":[]}
+            groups[k]["s"].extend(grp["spread"].dropna().values.tolist())
+            groups[k]["v"].extend(grp["volume"].clip(lower=0).fillna(1).values.tolist())
         del df
-
     rows = []
-    for (dte, bucket), g in groups.items():
-        spreads = np.array(g["spreads"])
-        if len(spreads) < min_obs:
-            continue
-        weights = np.array(g["volumes"])
-        if weights.sum() <= 0:
-            weights = np.ones(len(spreads))
-        sum_w   = float(weights.sum())
-        sum_wx  = float((weights * spreads).sum())
-        sum_wx2 = float((weights * spreads**2).sum())
-        mu      = sum_wx / sum_w
-        sigma   = float(np.sqrt(max(sum_wx2 / sum_w - mu**2, 0)))
-
-        best_name, best_ks, best_params = "normal", np.inf, None
-        for name in families:
-            try:
-                if name == "lognorm":
-                    shift  = max(0.0, -spreads.min() + 1e-6)
-                    params = lognorm.fit(spreads + shift, floc=0)
-                    ks, _  = kstest(spreads + shift, lognorm.cdf, args=params)
-                    params = params + (shift,)
-                else:
-                    params = DIST_MAP[name].fit(spreads)
-                    ks, _  = kstest(spreads, DIST_MAP[name].cdf, args=params)
-                if ks < best_ks:
-                    best_ks, best_name, best_params = ks, name, params
-            except Exception:
-                continue
-
-        rows.append({
-            "symbol": symbol, "dte": dte, "bucket": bucket,
-            "n": len(spreads), "mu": round(mu, 6), "sigma": round(sigma, 6),
-            "sum_w": sum_w, "sum_wx": sum_wx, "sum_wx2": sum_wx2,
-            "dist_name": best_name,
-            "dist_params": json.dumps(list(best_params)) if best_params else "[]",
-            "p5":  round(float(np.percentile(spreads,  5)), 5),
-            "p25": round(float(np.percentile(spreads, 25)), 5),
-            "p50": round(float(np.percentile(spreads, 50)), 5),
-            "p75": round(float(np.percentile(spreads, 75)), 5),
-            "p95": round(float(np.percentile(spreads, 95)), 5),
-        })
-
+    for (dte,bk),g in groups.items():
+        s = np.array(g["s"]); w = np.array(g["v"])
+        if len(s) < min_obs: continue
+        if w.sum() <= 0: w = np.ones(len(s))
+        sw = float(w.sum()); mu = float((w*s).sum()/sw)
+        sigma = float(np.sqrt(max((w*s*s).sum()/sw - mu*mu, 0)))
+        rows.append({"dte":dte, "bucket":bk, "n":len(s), "mu":round(mu,6), "sigma":round(sigma,6)})
+    log.info(f"  distributions: dropped {n_dropped:,} holdout-year (yy={holdout_yy}) ticks before fitting")
     return pd.DataFrame(rows)
 
 
-def scan_reversion_events(symbol, contracts, eq_df, dist_df, expiry_dates, trading_days, cfg, daily_vix, log):
-    """Two-pointer session scan, one contract at a time.  Multiple events per session."""
+def scan_session_for_events(session, lookup, cfg, daily_vix, date_val):
     z_thresh    = cfg["detection"]["z_thresh"]
-    exit_t      = cfg["detection"]["event_exit_threshold"]
+    rev_window  = pd.Timedelta(minutes=cfg["detection"]["reversion_window_min"])
+    cooldown_s  = cfg["detection"].get("cooldown_seconds", 60)
     sigma_floor = cfg["detection"]["sigma_floor"]
-    vix_gate    = cfg["vix"]["gate_max"]
-    vix_window  = cfg["vix"]["rolling_1m"]
-    time_buckets = cfg["time_buckets"]
 
-    lookup = {
-        (int(r["dte"]), r["bucket"]): (r["mu"], r["sigma"])
-        for _, r in dist_df.iterrows()
-        if r["sigma"] >= sigma_floor
-    }
+    dte = int(session["dte"].iloc[0])
+    spreads = session["spread"].values
+    ts = session.index
+    n = len(spreads)
 
+    z = np.full(n, np.nan); n_obs = np.full(n, np.nan)
+    for i in range(n):
+        bk = session.iloc[i]["bucket"]
+        rec = lookup.get((dte, bk))
+        if rec is None: continue
+        mu, sg, no = rec
+        if sg < sigma_floor: continue
+        z[i] = (spreads[i] - mu) / sg
+        n_obs[i] = no
+
+    vix_at_det = np.nan
+    if daily_vix is not None:
+        prior = daily_vix[daily_vix.index < date_val]["vix_close"]
+        if len(prior): vix_at_det = float(prior.iloc[-1])
+
+    events = []
+    i = 0
+    while i < n:
+        if np.isnan(z[i]) or abs(z[i]) < z_thresh:
+            i += 1; continue
+
+        det_idx, det_ts, z_det = i, ts[i], z[i]
+        positive = z_det > 0
+        spread_t = spreads[det_idx]
+
+        # Track BOTH extrema within the reversion window:
+        rev_idx, rev_z, rev_spread = det_idx, z_det, spread_t          # most reverted (toward 0)
+        ext_idx, ext_z = det_idx, z_det                                 # most extended (away from 0)
+        deadline = det_ts + rev_window
+        last_in_window_idx = det_idx
+
+        for j in range(det_idx + 1, n):
+            if ts[j] > deadline: break
+            last_in_window_idx = j
+            zj = z[j]
+            if np.isnan(zj): continue
+            # Most reverted (closer to zero)
+            if positive and zj < rev_z:
+                rev_z, rev_idx, rev_spread = zj, j, spreads[j]
+            elif (not positive) and zj > rev_z:
+                rev_z, rev_idx, rev_spread = zj, j, spreads[j]
+            # Most extended (further from zero)
+            if positive and zj > ext_z:
+                ext_z, ext_idx = zj, j
+            elif (not positive) and zj < ext_z:
+                ext_z, ext_idx = zj, j
+
+        feats = attach_features(session, det_idx,
+                                dte_bucket_n_obs=n_obs[det_idx],
+                                vix_at_det=vix_at_det)
+
+        max_rev_z = (z_det - rev_z) if positive else (rev_z - z_det)
+        max_ext_z = (ext_z - z_det) if positive else (z_det - ext_z)
+
+        row = {
+            "date": pd.Timestamp(date_val).normalize(),
+            "contract": session["contract"].iloc[0],
+            "dte": dte, "bucket": session.iloc[det_idx]["bucket"],
+            "direction": "above" if positive else "below",
+            "detection_ts": pd.Timestamp(det_ts),
+            "z_t_detection": round(float(z_det), 4),
+            "spread_t": round(float(spread_t), 6),
+            "futures_t": round(float(session["futures_price"].iloc[det_idx]), 4),
+            "cash_t":    round(float(session["cash_price"].iloc[det_idx]), 4),
+
+            # Most-reverted extremum (used for reversion classification)
+            "extremum_z":           round(float(rev_z), 4),
+            "extremum_spread":      round(float(rev_spread), 6),
+            "extremum_ts":          pd.Timestamp(ts[rev_idx]),
+            "max_reversion_z":      round(float(max_rev_z), 4),
+            "max_reversion_spread": round(float(spread_t - rev_spread) if positive else float(rev_spread - spread_t), 6),
+            "time_to_extremum_min": round((pd.Timestamp(ts[rev_idx]) - pd.Timestamp(det_ts)).total_seconds()/60, 2),
+
+            # Most-extended extremum (used for continuation classification)
+            "most_extended_z":      round(float(ext_z), 4),
+            "most_extended_ts":     pd.Timestamp(ts[ext_idx]),
+            "max_extended_z":       round(float(max_ext_z), 4),
+            "time_to_extended_min": round((pd.Timestamp(ts[ext_idx]) - pd.Timestamp(det_ts)).total_seconds()/60, 2),
+
+            # Window-end snapshot
+            "window_end_idx_z":     round(float(z[last_in_window_idx]), 4) if not np.isnan(z[last_in_window_idx]) else np.nan,
+            "spread_at_window_end": round(float(spreads[last_in_window_idx]), 6),
+            "time_to_window_end":   round((pd.Timestamp(ts[last_in_window_idx]) - pd.Timestamp(det_ts)).total_seconds()/60, 2),
+
+            # Reversion fraction (label-independent target)
+            "reversion_frac": round(float(max_rev_z / abs(z_det)) if abs(z_det) > 1e-9 else 0.0, 4),
+        }
+        row.update(feats)
+        events.append(row)
+
+        # Cooldown: walk past the elevated regime, then sleep cooldown_s.
+        k = last_in_window_idx + 1
+        while k < n and (np.isnan(z[k]) or abs(z[k]) >= z_thresh):
+            k += 1
+        if k < n:
+            cool_until = pd.Timestamp(ts[k]) + pd.Timedelta(seconds=cooldown_s)
+            while k < n and pd.Timestamp(ts[k]) < cool_until:
+                k += 1
+        i = k
+
+    return events
+
+
+def scan_reversion_events(symbol, contracts, eq_df, dist_df, expiry_dates,
+                          trading_days, cfg, daily_vix, log):
+    lookup = {(int(r["dte"]), r["bucket"]): (r["mu"], r["sigma"], r["n"])
+              for _, r in dist_df.iterrows()}
+    vix_gate = cfg["vix"]["gate_max"]
+    tb = cfg["time_buckets"]
     all_events = []
-
-    for contract, fut_path in contracts:
-        expiry = get_contract_expiry(contract, expiry_dates)
-        if expiry is None:
-            continue
-        try:
-            df = _merge_contract(fut_path, eq_df, expiry, trading_days, time_buckets, contract)
-        except Exception as e:
-            log.warning(f"  [{contract}] skipped: {e}")
-            continue
-        if df is None:
-            continue
-
-        df["_date"] = df.index.normalize()
-
-        for date_val, session in df.groupby("_date"):
-
-            # VIX filter: use only strictly prior days
+    for contract, fp in contracts:
+        exp = get_contract_expiry(contract, expiry_dates)
+        if exp is None: continue
+        try: df = merge_contract(fp, eq_df, exp, trading_days, tb, contract)
+        except Exception as e: log.warning(f"  [{contract}] {e}"); continue
+        if df is None: continue
+        df["_d"] = df.index.normalize()
+        for date_val, session in df.groupby("_d"):
             if daily_vix is not None:
-                prior = daily_vix[daily_vix.index < date_val]["vix_close"]
-                if len(prior) >= 5:
-                    rv = prior.rolling(vix_window, min_periods=5).mean().iloc[-1]
-                    if not np.isnan(rv) and rv > vix_gate:
-                        continue
-
+                prior = daily_vix[daily_vix.index < date_val]
+                if len(prior):
+                    # Spot VIX gate (symmetric across train/test). The rolling
+                    # mean is still computed in load_vix_daily for diagnostics
+                    # / future use, but the gate fires on prior-day spot only.
+                    spot = prior["vix_close"].iloc[-1]
+                    if not pd.isna(spot) and spot > vix_gate: continue
             session = session.sort_index().dropna(subset=["spread"])
-            if session.empty:
-                continue
-
-            dte     = int(session["dte"].iloc[0])
-            ticks   = session.index
-            spreads = session["spread"].values
-            n       = len(ticks)
-
-            z    = np.full(n, np.nan)
-            mu_s = np.full(n, np.nan)
-            sg_s = np.full(n, np.nan)
-            for i in range(n):
-                key = (dte, session.iloc[i]["bucket"])
-                if key in lookup:
-                    mu, sigma = lookup[key]
-                    z[i], mu_s[i], sg_s[i] = (spreads[i] - mu) / sigma, mu, sigma
-
-            eod_spread = spreads[-1]
-
-            # two pointers — multiple events per session
-            left = 0
-            while left < n:
-                if np.isnan(z[left]) or abs(z[left]) < z_thresh:
-                    left += 1
-                    continue
-
-                z_det    = z[left]
-                positive = z_det > 0
-                rev_thr  =  (z_thresh - exit_t)           if positive else -(z_thresh - exit_t)
-                cont_thr =  max(z_thresh + exit_t, z_det) if positive else min(-(z_thresh + exit_t), z_det)
-
-                exit_type = exit_right = None
-                right = left + 1
-                while right < n:
-                    if np.isnan(z[right]):
-                        right += 1
-                        continue
-                    if positive:
-                        if z[right] < rev_thr:
-                            exit_type, exit_right = "reversion", right; break
-                        if z[right] > cont_thr:
-                            exit_type, exit_right = "continuation", right; break
-                    else:
-                        if z[right] > rev_thr:
-                            exit_type, exit_right = "reversion", right; break
-                        if z[right] < cont_thr:
-                            exit_type, exit_right = "continuation", right; break
-                    right += 1
-
-                mu_det, sg_det = mu_s[left], sg_s[left]
-                z_eod = (eod_spread - mu_det) / (sg_det + 1e-12) if not np.isnan(mu_det) else np.nan
-
-                if exit_type is not None:
-                    pz  = z[exit_right:];       valid = ~np.isnan(pz)
-                    ps  = spreads[exit_right:]
-                    pt  = ticks[exit_right:]
-                    if valid.sum() == 0:
-                        left = exit_right + 1
-                        continue
-                    pz, ps, pt = pz[valid], ps[valid], pt[valid]
-                    ext_i = (int(np.argmin(pz)) if positive else int(np.argmax(pz))) if exit_type == "reversion" \
-                             else (int(np.argmax(pz)) if positive else int(np.argmin(pz)))
-                    ext_z, ext_sp, ext_ts = float(pz[ext_i]), float(ps[ext_i]), pt[ext_i]
-                    exit_ts = ticks[exit_right]
-                    resume_i = exit_right + 1
-                else:
-                    if not ((z_eod > z_det) if positive else (z_eod < z_det)):
-                        # non-event: z stayed put without crossing back — no signal
-                        left = n
-                        continue
-                    exit_type = "divergence"
-                    ext_z, ext_sp, ext_ts = float(z_eod), float(eod_spread), ticks[-1]
-                    exit_ts = pd.NaT
-                    resume_i = n
-
-                det_ts   = ticks[left]
-                t_min    = det_ts.hour * 60 + det_ts.minute
-                all_events.append({
-                    "symbol":               symbol,
-                    "date":                 date_val,
-                    "contract":             contract,
-                    "dte":                  dte,
-                    "bucket":               session.iloc[left]["bucket"],
-                    "direction":            "above" if positive else "below",
-                    "event_type":           exit_type,
-                    "detection_ts":         det_ts,
-                    "z_t":                  round(float(z_det), 4),
-                    "spread_t":             round(float(spreads[left]), 5),
-                    "exit_ts":              exit_ts,
-                    "extremum_z":           round(ext_z, 4),
-                    "extremum_spread":      round(ext_sp, 5),
-                    "extremum_ts":          ext_ts,
-                    "time_to_extremum_min": round((ext_ts - det_ts).total_seconds() / 60, 1),
-                    "max_reversion_spread": round(float(spreads[left] - ext_sp), 5),
-                    "spread_eod":           round(float(eod_spread), 5),
-                    "z_eod":                round(float(z_eod), 4) if not np.isnan(z_eod) else np.nan,
-                    "session_elapsed_frac": round(max(0.0, min(1.0, (t_min - SESSION_START) / SESSION_LEN)), 4),
-                    "reversion_frac":       round((z_det - ext_z) / (abs(z_det) + 1e-12), 4),
-                    "fully_reverted":       bool(abs(ext_z) < 0.5),
-                })
-                left = resume_i  # advance past this event, keep scanning
-
+            if session.empty: continue
+            rows = scan_session_for_events(session, lookup, cfg, daily_vix, date_val)
+            for r in rows: r["symbol"] = symbol
+            all_events.extend(rows)
         del df
+
+    if all_events:
+        tmp = pd.DataFrame(all_events)
+        log.info(f"  detected {len(tmp)} raw events; "
+                 f"avg_t_reverted={tmp['time_to_extremum_min'].mean():.1f}min "
+                 f"avg_t_extended={tmp['time_to_extended_min'].mean():.1f}min "
+                 f"median_t_reverted={tmp['time_to_extremum_min'].median():.1f}min")
 
     return pd.DataFrame(all_events)
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config.yaml")
-    args = parser.parse_args()
-
-    import logging
+    p = argparse.ArgumentParser(); p.add_argument("--config", default="config.yaml")
+    args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log = logging.getLogger("preprocess")
-
     cfg = load_config(args.config)
-    expiry_dates, trading_days = load_calendars(cfg)
+
+    expiry_df = pd.read_csv(cfg["paths"]["expiry_csv"])
+    col = next(c for c in expiry_df.columns if "expiry" in c.lower() or "date" in c.lower())
+    expiry_dates = sorted(pd.to_datetime(expiry_df[col]).unique())
+    trading_df = pd.read_csv(cfg["paths"]["trading_csv"], parse_dates=["date"])
+    trading_days = pd.DatetimeIndex(sorted(trading_df["date"]))
     log.info(f"Loaded {len(expiry_dates)} expiries, {len(trading_days)} trading days")
 
     daily_vix = load_vix_daily(cfg["paths"]["raw_vix"], cfg["vix"]["rolling_1m"])
-    log.info("VIX loaded" if daily_vix is not None else "No VIX — gate filter disabled")
+    log.info("VIX loaded" if daily_vix is not None else "VIX disabled")
 
     dist_out = Path(cfg["paths"]["processed"]) / "distributions"
     rev_out  = Path(cfg["paths"]["processed"]) / "reversion"
-    dist_out.mkdir(parents=True, exist_ok=True)
-    rev_out.mkdir(parents=True, exist_ok=True)
+    dist_out.mkdir(parents=True, exist_ok=True); rev_out.mkdir(parents=True, exist_ok=True)
 
     for symbol in (cfg.get("symbols") or []):
-        log.info(f"[{symbol}] scanning files...")
-        contracts, equity_paths = scan_symbol_files(cfg, symbol)
-        log.info(f"[{symbol}] {len(contracts)} contracts found")
-
-        log.info(f"[{symbol}] loading equity...")
-        eq_df = load_equity(equity_paths)
-        log.info(f"[{symbol}] equity: {len(eq_df):,} ticks")
+        log.info(f"[{symbol}] scanning...")
+        contracts, eq_paths = scan_symbol_files(cfg, symbol)
+        log.info(f"[{symbol}] {len(contracts)} contracts")
+        eq_df = load_equity(eq_paths)
+        if eq_df is None: log.warning(f"[{symbol}] no equity"); continue
+        log.info(f"[{symbol}] equity ticks: {len(eq_df):,}")
 
         log.info(f"[{symbol}] building distributions...")
         dist_df = build_distributions(symbol, contracts, eq_df, expiry_dates, trading_days, cfg, log)
         dist_df.to_parquet(dist_out / f"{symbol}_dist.parquet", index=False)
-        log.info(f"[{symbol}] dist: {len(dist_df)} (dte, bucket) rows saved")
+        log.info(f"[{symbol}] dist cells: {len(dist_df)}")
 
-        log.info(f"[{symbol}] scanning reversion events...")
-        rev_df = scan_reversion_events(symbol, contracts, eq_df, dist_df, expiry_dates, trading_days, cfg, daily_vix, log)
-        rev_df.to_parquet(rev_out / f"{symbol}_reversion.parquet", index=False)
-        n_rev  = (rev_df["event_type"] == "reversion").sum()    if len(rev_df) else 0
-        n_cont = (rev_df["event_type"] == "continuation").sum() if len(rev_df) else 0
-        n_div  = (rev_df["event_type"] == "divergence").sum()   if len(rev_df) else 0
-        log.info(f"[{symbol}] {len(rev_df)} events — rev={n_rev} cont={n_cont} div={n_div}")
-
+        log.info(f"[{symbol}] scanning events...")
+        rev_df = scan_reversion_events(symbol, contracts, eq_df, dist_df,
+                                       expiry_dates, trading_days, cfg, daily_vix, log)
+        out_path = rev_out / f"{symbol}_reversion.parquet"
+        rev_df.to_parquet(out_path, index=False)
+        log.info(f"[{symbol}] {len(rev_df)} raw events written -> {out_path}")
+        log.info(f"[{symbol}] run label_events.py to apply classification + split")
         del eq_df, dist_df, rev_df
 
     log.info("Done.")

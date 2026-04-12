@@ -1,40 +1,15 @@
-# config.yaml — Single source of truth.
-# All paths relative to DATA_ROOT env var (default: ./data)
-
-data_backend: "file"   # "file" now, "kdb" later
+# Single source of truth. Edit here, nowhere else.
+data_backend: "file"
 
 paths:
-  # Futures and equity CSVs coexist in the same directories.
-  # Scanner differentiates by filename pattern:
-  #   futures: {SYMBOL}{YY}{MMM}FUT.csv
-  #   equity:  {SYMBOL}.csv
-  raw_futures:
-    - "data/raw/2025"
-    - "data/raw/2022-24"
-
-  raw_equity:
-    - "data/raw/2025"
-    - "data/raw/2022-24"
-
-  raw_vix:
-    - "data/raw/2025/INDIAVIX.csv"
-    - "data/raw/2022-24/INDIAVIX.csv"
-
-  processed: "data/processed"
-  dist_tables: "data/dist_tables"
-
-  expiry_csv: "data/raw/dates/expiry_dates.csv"
+  raw_futures: ["data/raw/2025", "data/raw/2022-24"]
+  raw_equity:  ["data/raw/2025", "data/raw/2022-24"]
+  raw_vix:     ["data/raw/2025/INDIAVIX.csv", "data/raw/2022-24/INDIAVIX.csv"]
+  processed:   "data/processed"
+  expiry_csv:  "data/raw/dates/expiry_dates.csv"
   trading_csv: "data/raw/dates/trading_calendar.csv"
 
-# kdb+ stub (future)
-kdb:
-  host: "localhost"
-  port: 5000
-  auth: null
-
 symbols: ["RELIANCE", "BAJFINANCE"]
-year_filter: null
-candle_intervals: [1, 2]
 
 time_buckets:
   - ["09:15-10:00", "09:15", "10:00"]
@@ -46,54 +21,42 @@ time_buckets:
   - ["15:00-15:30", "15:00", "15:30"]
 
 detection:
-  z_thresh: 1.8
-  event_exit_threshold: 0.3
-  z_match_band: 0.5
-  sigma_floor: 0.005
+  z_thresh: 2.5
+  event_exit_threshold: 0.5
+  reversion_window_min: 240
+  cooldown_seconds: 60
+  sigma_floor: 0.02
+  continuation_extra_z: 0.75
+  min_dwell_min: 10
 
 distributions:
-  families: ["normal", "t", "skewnorm", "lognorm"]
-  min_obs: 5
-  dte_window: 5
-  recalib_min: 10
-  overwrite: true
+  min_obs: 200
 
 vix:
   gate_max: 20.0
-  strict: true
-  rolling_1m: 22
-  rolling_1y: 252
-
-features:
-  oi_lookback: 10
-  momentum_lookback: 5
-
-regression:
-  mode: "live"
-  model_type: "ridge"
-  alpha: 1.0
+  rolling_1m: 20
 
 training:
   holdout_year: 25
-  min_train_months: 6
-  classifier:
-    n_estimators: 200
-    max_depth: 6
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
-  regressor:
-    n_estimators: 200
-    max_depth: 5
-    learning_rate: 0.1
-    subsample: 0.8
-    colsample_bytree: 0.8
 
-live:
-  date: "2026-03-16"
-  eod_time: "15:30"
-  feed_path: "live_ticks.json"
+model:
+  save_dir: "models/saved"
+  ridge_alpha: 1.0
+  features:
+    - dte
+    - bucket
+    - direction
+    - spread_t
+    - spread_velocity_5tick
+    - spread_accel_5tick
+    - volume_zscore_20tick
+    - oi_change_20tick
+    - time_since_session_open_min
+    - prior_spread_iqr_30tick
+    - vix_level
+    - dte_bucket_n_obs
 
-save:
-  format: "parquet"
-  overwrite: true
+mlflow:
+  enabled: true
+  tracking_uri: "http://mlflow:5000"
+  experiment: "basis-reversion"
