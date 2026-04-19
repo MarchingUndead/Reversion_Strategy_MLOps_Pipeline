@@ -1,28 +1,34 @@
 # Notebook → Python module split
 
-Mirror of the planning doc driving this refactor. Three exploratory notebooks were flattened into library `.py` modules with `config.yaml` as the single source of truth.
+Mirror of the planning doc driving this refactor. Four notebooks under
+`src/notebooks/` are the exploratory counterparts of five library modules
+under `src/`. `config.yaml` is the single source of truth for every parameter.
 
 ## File layout
 
 ```
 Reversion_Strategy_MLOps_Pipeline/
-├── config.yaml                <- all tunables; consumed by every src/*.py
+├── config.yaml                  <- all tunables; consumed by every src/*.py
 └── src/
-    ├── preprocess.py          <- distributions.ipynb
-    ├── events.py              <- events.ipynb (track + event extraction)
-    ├── plots.py               <- events.ipynb (plot) + model.ipynb (equity curve)
-    ├── model.py               <- model.ipynb (load + train + evaluate)
-    ├── backtest.py            <- model.ipynb (backtest function)
-    ├── distributions.ipynb    <- kept, thin demo
-    ├── events.ipynb           <- kept, thin demo
-    └── model.ipynb            <- kept, thin demo
+    ├── preprocess.py            <- distributions.ipynb
+    ├── events.py                <- events.ipynb (track + event extraction)
+    ├── plots.py                 <- events.ipynb (plot) + model.ipynb (equity curve)
+    ├── model.py                 <- model.ipynb (load + train + evaluate)
+    ├── backtest.py              <- model.ipynb (backtest fn) + backtest.ipynb (v2 rules)
+    └── notebooks/
+        ├── distributions.ipynb
+        ├── events.ipynb
+        ├── model.ipynb
+        └── backtest.ipynb
 ```
 
-Notebooks are left in-place for interactive exploration; their logic lives in the `.py` files.
+Notebooks set `root = Path("../..").resolve()` so paths still resolve to
+`data/raw/`, `data/processed/`, and `config.yaml` when run from
+`src/notebooks/`.
 
 ## Function-to-file mapping
 
-### `src/preprocess.py` ← `distributions.ipynb`
+### `src/preprocess.py` ← `notebooks/distributions.ipynb`
 
 | Function | Notebook cell |
 |---|---|
@@ -34,9 +40,10 @@ Notebooks are left in-place for interactive exploration; their logic lives in th
 | `store_group(df_group, symbol, dte, bucket)` | `8ed54d03` |
 | `__main__` | cells `cde1b29f` (raw → per-(dte,bucket) CSVs) + `1e24a23c` (expanding distribution stats + warmup mask) |
 
-Module-level state retained: `trading_cal`, `expiry_dates`, `trading_days_sorted`, `expiry_list`, `df_vix`, `high_vix_days`.
+Module-level state retained: `trading_cal`, `expiry_dates`, `trading_days_sorted`,
+`expiry_list`, `df_vix`, `high_vix_days`.
 
-### `src/events.py` ← `events.ipynb`
+### `src/events.py` ← `notebooks/events.ipynb`
 
 | Function | Notebook cell |
 |---|---|
@@ -57,7 +64,7 @@ Module-level state retained: `trading_cal`, `expiry_dates`, `trading_days_sorted
 
 Module-level cache `_processed_cache = {}` is preserved.
 
-### `src/plots.py` ← `events.ipynb` + `model.ipynb`
+### `src/plots.py` ← `notebooks/events.ipynb` + `notebooks/model.ipynb`
 
 | Function | Source |
 |---|---|
@@ -66,7 +73,7 @@ Module-level cache `_processed_cache = {}` is preserved.
 
 No `__main__`. Pure presentation, imported by `events.py` and `backtest.py`.
 
-### `src/model.py` ← `model.ipynb`
+### `src/model.py` ← `notebooks/model.ipynb`
 
 | Function | Notebook cell |
 |---|---|
@@ -77,16 +84,16 @@ No `__main__`. Pure presentation, imported by `events.py` and `backtest.py`.
 | `evaluate(test_df, position, feature_cols, models)` | `e2700e3e` |
 | `__main__` | `50a773f3` (feature/target engineering) + `05dc933a` (time split) + per-position `train_position` and `evaluate` loops |
 
-### `src/backtest.py` ← `model.ipynb`
+### `src/backtest.py` ← `notebooks/model.ipynb` + `notebooks/backtest.ipynb`
 
-| Function | Notebook cell |
+| Function | Source |
 |---|---|
-| `backtest(eval_df, label)` | `73c0db19` — unchanged |
-| `__main__` | imports training pipeline from `model.py`, runs `backtest(evals[p], label)` per position, then `plot_equity_curve(combined)` |
+| `backtest(eval_df, label, trade_log_path=None)` | backtest.ipynb cell `cell-06-backtest-fn` — v2 rules (divergence sign-flip, continuation skipped, txn costs) supersedes model.ipynb cell `73c0db19` |
+| `__main__` | imports training pipeline from `model.py`, runs `backtest(evals[p], label, log_path)` per position, then `plot_equity_curve(combined)` |
 
 ## Preservation rules
 
-1. **No logic changes.** Function bodies copied verbatim; only module-level constants became `_cfg["..."]` lookups.
+1. **No logic changes.** Function bodies copied verbatim from the notebooks; module-level constants became `_cfg["..."]` lookups.
 2. **Same names.** Every notebook function name is preserved, including underscore helpers. The only new name is `plot_equity_curve` (the notebook's inline equity block had no name).
 3. **Same comments.** Notebook comments were kept; no new commentary added.
 4. **Layout.** `imports → _cfg → module-level state → functions → if __name__ == "__main__":`.
@@ -108,7 +115,8 @@ All dropped items remain in the notebooks for reference.
 python src/preprocess.py    # raw ticks  -> data/processed/*.csv
 python src/events.py        # processed  -> data/processed/events/*.csv
 python src/model.py         # events     -> per-position classifier + regressors
-python src/backtest.py      # model      -> per-position PnL + equity curve
+python src/backtest.py      # model      -> per-position PnL + equity curve + trade logs
 ```
 
-`preprocess.py → events.py → model.py → backtest.py` — each stage consumes the previous stage's output on disk, so each can run independently once its inputs exist.
+Each stage consumes the previous stage's output from disk, so each runs
+independently once its inputs exist.

@@ -54,3 +54,6 @@ model:
 backtest:
   positions:       [0, 1, 2]
   position_labels: [near, mid, far]
+  lot_size:        10         # 1 lot = 10 units
+  order_size:      1          # 1 lot per trade
+  txn_cost_rate:   0.0001     # 0.01% of notional, charged on each leg
