@@ -150,8 +150,6 @@ The refactor sets each stage up so the following can be added without touching c
 
 ## Invariants
 
-See [`CLAUDE.md`](CLAUDE.md) for the full rules. The critical ones:
-
 - **I1** — no future data in distributions (snapshot before update, per session)
 - **I2** — causal features (no peeking past `det_idx`)
 - **I3** — forward scan is preprocessing-only
