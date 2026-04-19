@@ -1,62 +1,56 @@
-# Single source of truth. Edit here, nowhere else.
-data_backend: "file"
+# Stores all paths, variables, etc.
+# Acts as a SINGLE SOURCE OF TRUTH.
+# Consumed by every src/*.py via yaml.safe_load at import.
 
 paths:
-  raw_futures: ["data/raw/2025", "data/raw/2022-24"]
-  raw_equity:  ["data/raw/2025", "data/raw/2022-24"]
-  raw_vix:     ["data/raw/2025/INDIAVIX.csv", "data/raw/2022-24/INDIAVIX.csv"]
-  processed:   "data/processed"
-  expiry_csv:  "data/raw/dates/expiry_dates.csv"
-  trading_csv: "data/raw/dates/trading_calendar.csv"
+  raw_root:    data/raw
+  train_root:  data/raw/2022-24
+  test_root:   data/raw/2025
+  dates:       data/raw/dates
+  processed:   data/processed
+  events:      data/processed/events
 
-symbols: ["RELIANCE", "BAJFINANCE"]
+symbols:      [BAJFINANCE, RELIANCE]
+months:       [JAN, FEB, MAR, APR, MAY, JUN, JUL, AUG, SEP, OCT, NOV, DEC]
+train_years:  ["22", "23", "24"]
 
-time_buckets:
-  - ["09:15-10:00", "09:15", "10:00"]
-  - ["10:00-11:00", "10:00", "11:00"]
-  - ["11:00-12:00", "11:00", "12:00"]
-  - ["12:00-13:00", "12:00", "13:00"]
-  - ["13:00-14:00", "13:00", "14:00"]
-  - ["14:00-15:00", "14:00", "15:00"]
-  - ["15:00-15:30", "15:00", "15:30"]
+buckets:      ["9:15:00", "10:00:00", "11:00:00", "12:00:00", "13:00:00", "14:00:00", "15:00:00"]
 
-detection:
-  z_thresh: 2.5
-  event_exit_threshold: 0.5
-  reversion_window_min: 240
-  cooldown_seconds: 60
-  sigma_floor: 0.02
-  continuation_extra_z: 0.75
-  min_dwell_min: 10
+schemas:
+  fut: [day, time, fut_ltp, fut_ltq, oi_fut, fut_bidprice, fut_bidvol, fut_askprice, fut_askvol]
+  eq:  [day, time, ltp, ltq, oi, eq_bidprice, eq_bidvol, eq_askprice, eq_askvol]
+  vix: [day, time, vix, vol_vix, oi_vix]
 
-distributions:
-  min_obs: 200
+preprocess:
+  vix_thresh:    20
+  warmup_months: 3
+  vix_file:      INDIAVIX.csv
 
-vix:
-  gate_max: 20.0
-  rolling_1m: 20
-
-training:
-  holdout_year: 25
+events:
+  out_thresh: 2.0
+  rev_thresh: 1.0
+  min_ticks:  3
 
 model:
-  save_dir: "models/saved"
-  ridge_alpha: 1.0
-  features:
+  feature_cols:
+    - det_z_score
+    - det_spread
+    - side
     - dte
     - bucket
-    - direction
-    - spread_t
-    - spread_velocity_5tick
-    - spread_accel_5tick
-    - volume_zscore_20tick
-    - oi_change_20tick
-    - time_since_session_open_min
-    - prior_spread_iqr_30tick
-    - vix_level
-    - dte_bucket_n_obs
+    - det_dist_std
+    - det_dist_count
+    - det_fut_ltq
+    - det_oi_fut
+    - det_ltq
+    - det_fut_ba
+    - det_eq_ba
+  train_year_cutoff: 2023
+  test_year:         2024
+  rf_n_estimators:   200
+  rf_max_depth:      10
+  random_state:      42
 
-mlflow:
-  enabled: true
-  tracking_uri: "http://mlflow:5000"
-  experiment: "basis-reversion"
+backtest:
+  positions:       [0, 1, 2]
+  position_labels: [near, mid, far]
