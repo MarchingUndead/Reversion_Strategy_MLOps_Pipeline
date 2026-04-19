@@ -1,3 +1,41 @@
-# Add patterns of files dvc should ignore, which could improve
-# the performance. Learn more at
-# https://dvc.org/doc/user-guide/dvcignore
+# Patterns DVC should ignore when hashing / traversing tracked directories.
+# Keeps `dvc status` fast and prevents incidental files from changing hashes.
+# Docs: https://dvc.org/doc/user-guide/project-structure/dvcignore-files
+
+# Python bytecode & build artefacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# Local environment / secrets (never hash into data versions)
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files that may sit next to tracked data
+*.log
+*.tmp
+*.bak
+
+# MLflow local store (tracked separately, not part of data versioning)
+mlruns/
+
+# Airflow/Grafana/Prometheus local state (container-mounted; not data)
+airflow/logs/
+monitoring/grafana/data/
+monitoring/prometheus/data/

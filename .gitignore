@@ -1,21 +1,47 @@
-# Data contents (DVC-tracked, not Git)
+# --- DVC-tracked data (content lives in DVC cache, not Git) ---
 /data/raw/2025/
 /data/raw/2022-24/
 /data/raw/dates/
 /data/processed/
 /data/dist_tables/
 
-# Python
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Logs
-/logs/*.log
+# --- Jupyter ---
+.ipynb_checkpoints/
 
-# MLflow
-/mlruns/
-
-# Environment
+# --- Virtual environments ---
 .env
 .venv/
+venv/
+env/
+
+# --- Logs ---
+/logs/*.log
+*.log
+
+# --- MLOps local state (container volumes & local artefact stores) ---
+/mlruns/
+/models/
+/metrics/
+/airflow/logs/
+/airflow/plugins/__pycache__/
+/monitoring/grafana/data/
+/monitoring/prometheus/data/
+/dvc-storage/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
