@@ -9,7 +9,10 @@ _cfg = yaml.safe_load(open(ROOT / "config.yaml"))
 
 raw_path       = ROOT / _cfg["paths"]["raw_root"]
 train_path     = ROOT / _cfg["paths"]["train_root"]
-test_path      = ROOT / _cfg["paths"]["test_root"]
+# NOTE: data/raw/2025/ is the hidden-test holdout. preprocess.py deliberately
+# does not reference it. `backtest.py --split hidden --confirm-holdout` is the
+# only supported path to touch 2025, and that flow requires a separate,
+# opt-in preprocessing pass (not part of this script).
 dates_path     = ROOT / _cfg["paths"]["dates"]
 processed_path = ROOT / _cfg["paths"]["processed"]
 

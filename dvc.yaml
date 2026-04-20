@@ -1,0 +1,62 @@
+# Pipeline DAG. Re-run affected stages with `dvc repro`.
+# Run one stage only: `dvc repro <stage>`.
+# Hidden-test stage is `frozen: true` and excluded from the default graph —
+# run explicitly via `dvc repro backtest_hidden`.
+
+stages:
+
+  preprocess:
+    cmd: python src/preprocess.py
+    deps:
+      - src/preprocess.py
+      - data/raw
+      - config.yaml
+    outs:
+      - data/processed
+
+  events:
+    cmd: python src/events.py
+    deps:
+      - src/events.py
+      - src/plots.py
+      - data/processed
+      - config.yaml
+    outs:
+      - data/processed/events
+
+  train:
+    cmd: python src/model.py
+    deps:
+      - src/model.py
+      - data/processed/events
+      - config.yaml
+    outs:
+      - models
+
+  backtest:
+    cmd: python src/backtest.py --split val
+    deps:
+      - src/backtest.py
+      - src/model.py
+      - src/plots.py
+      - data/processed/events
+      - models
+      - config.yaml
+    outs:
+      - data/processed/backtest_logs/trades_position_0_near_val.csv
+      - data/processed/backtest_logs/trades_position_1_mid_val.csv
+      - data/processed/backtest_logs/trades_position_2_far_val.csv
+
+  backtest_hidden:
+    cmd: python src/backtest.py --split hidden --confirm-holdout
+    deps:
+      - src/backtest.py
+      - src/model.py
+      - data/processed/events
+      - models
+      - config.yaml
+    outs:
+      - data/processed/backtest_logs/trades_position_0_near_hidden.csv
+      - data/processed/backtest_logs/trades_position_1_mid_hidden.csv
+      - data/processed/backtest_logs/trades_position_2_far_hidden.csv
+    frozen: true

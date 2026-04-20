@@ -18,6 +18,8 @@
 # No slippage, no financing. Close at res_timestamp (first forward crossing of
 # rev/div, or EOD for continuation).
 
+import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -110,36 +112,47 @@ def backtest(eval_df, label, trade_log_path=None):
 
 
 if __name__ == "__main__":
-    from model import (load_events_all, _session_month_from_day, train_position,
-                       evaluate, MONTHS)
+    from model import (load_events_all, prepare_events, split_events,
+                       train_position, evaluate, load_models)
 
-    events = load_events_all()
-    events["session_month"]  = events["day_fut"].apply(_session_month_from_day)
-    events["contract_month"] = events["contract"].map({m: i for i, m in enumerate(MONTHS)})
-    events["position"]       = (events["contract_month"] - events["session_month"]) % 12
-    events = events[events["position"].isin([0, 1, 2])].reset_index(drop=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split", choices=["val", "dev_test", "hidden"], default="val",
+                        help="which split to backtest on (default: val)")
+    parser.add_argument("--confirm-holdout", action="store_true",
+                        help="required to run --split hidden")
+    parser.add_argument("--retrain", action="store_true",
+                        help="force retraining instead of loading ./models/*.pkl")
+    args = parser.parse_args()
 
-    events["duration_sec"]  = (events["res_timestamp"] - events["det_timestamp"]).dt.total_seconds()
-    events["revert_delta"]  = events["det_z_score"].abs() - events["res_z_score"].abs()
-    events["spread_change"] = events["res_spread"] - events["det_spread"]
-    events["det_fut_ba"]    = events["det_fut_askprice"] - events["det_fut_bidprice"]
-    events["det_eq_ba"]     = events["det_eq_askprice"]  - events["det_eq_bidprice"]
+    if args.split == "hidden" and not args.confirm_holdout:
+        print("ERROR: --split hidden requires --confirm-holdout "
+              "(2025 is the one-shot holdout; see config.yaml::model.hidden_range).",
+              file=sys.stderr)
+        sys.exit(2)
 
-    events["year"] = events["det_timestamp"].dt.year
-    train = events[events["year"] <= _cfg["model"]["train_year_cutoff"]].reset_index(drop=True)
-    test  = events[events["year"] == _cfg["model"]["test_year"]].reset_index(drop=True)
+    events = prepare_events(load_events_all())
+    eval_df = split_events(events, args.split)
+    print(f"backtest split={args.split}  n_events={len(eval_df)}")
 
     feature_cols = _cfg["model"]["feature_cols"]
-    models = {p: train_position(train, p, feature_cols) for p in _cfg["backtest"]["positions"]}
-    evals  = {p: evaluate(test, p, feature_cols, models) for p in _cfg["backtest"]["positions"]}
+    positions    = _cfg["backtest"]["positions"]
+
+    # Load pickled models first; retrain only if missing or --retrain given.
+    models = {} if args.retrain else load_models(positions)
+    if args.retrain or any(models.get(p) is None for p in positions):
+        print("[backtest] training models in-process (no pickles found or --retrain)")
+        train = split_events(events, "train")
+        models = {p: train_position(train, p, feature_cols) for p in positions}
+
+    evals = {p: evaluate(eval_df, p, feature_cols, models) for p in positions}
 
     logs_dir = ROOT / "data" / "processed" / "backtest_logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n=== backtest (held-out) ===")
+    print(f"\n=== backtest (split={args.split}) ===")
     all_trades = []
     for p, label in zip(_cfg["backtest"]["positions"], _cfg["backtest"]["position_labels"]):
-        log_path = logs_dir / f"trades_position_{p}_{label}.csv"
+        log_path = logs_dir / f"trades_position_{p}_{label}_{args.split}.csv"
         t = backtest(evals.get(p), f"position={p} ({label})", trade_log_path=log_path)
         if t is not None:
             all_trades.append(t)

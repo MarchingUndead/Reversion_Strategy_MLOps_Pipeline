@@ -1,0 +1,32 @@
+.git/
+.gitignore
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Large data / build artefacts — mounted as volumes at runtime instead.
+data/
+models/
+dvc-storage/
+.dvc/cache/
+.dvc/tmp/
+
+# Notebooks — not needed in the runtime image.
+src/notebooks/
+*.ipynb
+
+# Docs & local files
+README.md
+ntbk2code.md
+*.md
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*

@@ -20,22 +20,13 @@ Thumbs.db
 desktop.ini
 *.swp
 *.swo
-*~
 
-# Local environment / secrets (never hash into data versions)
+# Local environment / secrets
 .env
 .env.*
 !.env.example
 
-# Logs and temporary files that may sit next to tracked data
+# Logs
 *.log
 *.tmp
 *.bak
-
-# MLflow local store (tracked separately, not part of data versioning)
-mlruns/
-
-# Airflow/Grafana/Prometheus local state (container-mounted; not data)
-airflow/logs/
-monitoring/grafana/data/
-monitoring/prometheus/data/

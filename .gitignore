@@ -27,14 +27,8 @@ env/
 /logs/*.log
 *.log
 
-# --- MLOps local state (container volumes & local artefact stores) ---
-/mlruns/
+# --- Local artefacts ---
 /models/
-/metrics/
-/airflow/logs/
-/airflow/plugins/__pycache__/
-/monitoring/grafana/data/
-/monitoring/prometheus/data/
 /dvc-storage/
 
 # --- OS / editor ---

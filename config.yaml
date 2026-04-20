@@ -5,6 +5,8 @@
 paths:
   raw_root:    data/raw
   train_root:  data/raw/2022-24
+  # test_root points at the HIDDEN HOLDOUT. No routine script reads this.
+  # Only `backtest.py --split hidden --confirm-holdout` is allowed to use it.
   test_root:   data/raw/2025
   dates:       data/raw/dates
   processed:   data/processed
@@ -45,11 +47,19 @@ model:
     - det_ltq
     - det_fut_ba
     - det_eq_ba
-  train_year_cutoff: 2023
-  test_year:         2024
-  rf_n_estimators:   200
-  rf_max_depth:      10
-  random_state:      42
+  # Split contract (YYYY-MM inclusive):
+  #   train     2022-01..2023-12   — fit
+  #   val       2024-01..2024-12   — primary backtest window (full 2024)
+  #   dev_test  2024-07..2024-12   — narrower slice if you want H2-only
+  #   hidden    2025-01..2025-12   — one-shot final eval, gated by --confirm-holdout
+  train_range:    ["2022-01", "2023-12"]
+  val_range:      ["2024-01", "2024-12"]
+  dev_test_range: ["2024-07", "2024-12"]
+  hidden_range:   ["2025-01", "2025-12"]
+  # RF hyperparameters (consumed by train_position in src/model.py)
+  rf_n_estimators:  200
+  rf_max_depth:     10
+  random_state:     42
 
 backtest:
   positions:       [0, 1, 2]
@@ -57,3 +67,4 @@ backtest:
   lot_size:        10         # 1 lot = 10 units
   order_size:      1          # 1 lot per trade
   txn_cost_rate:   0.0001     # 0.01% of notional, charged on each leg
+

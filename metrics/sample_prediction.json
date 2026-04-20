@@ -1,0 +1,20 @@
+{
+  "input_features": {
+    "det_z_score": 2.6426207961988624,
+    "det_spread": 1.2435450104675556,
+    "side": 1.0,
+    "dte": 9.0,
+    "bucket": 0.0,
+    "det_dist_std": 0.3136440953730754,
+    "det_dist_count": 21497.0,
+    "det_fut_ltq": 125.0,
+    "det_oi_fut": 5928250.0,
+    "det_ltq": 4963.0,
+    "det_fut_ba": 10.099999999999454,
+    "det_eq_ba": 22.449999999999818
+  },
+  "predicted_klass": "divergence",
+  "true_klass": "reversion",
+  "predicted_duration_sec": 11281.13,
+  "predicted_revert_delta": -0.43443435724121576
+}
