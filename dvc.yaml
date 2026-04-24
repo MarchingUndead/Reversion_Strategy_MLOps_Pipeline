@@ -22,13 +22,13 @@ stages:
       - data/processed
       - config.yaml
     outs:
-      - data/processed/events
+      - data/events
 
   train:
     cmd: python src/model.py
     deps:
       - src/model.py
-      - data/processed/events
+      - data/events
       - config.yaml
     outs:
       - models
@@ -39,24 +39,24 @@ stages:
       - src/backtest.py
       - src/model.py
       - src/plots.py
-      - data/processed/events
+      - data/events
       - models
       - config.yaml
     outs:
-      - data/processed/backtest_logs/trades_position_0_near_val.csv
-      - data/processed/backtest_logs/trades_position_1_mid_val.csv
-      - data/processed/backtest_logs/trades_position_2_far_val.csv
+      - data/backtest_logs/trades_position_0_near_val.csv
+      - data/backtest_logs/trades_position_1_mid_val.csv
+      - data/backtest_logs/trades_position_2_far_val.csv
 
   backtest_hidden:
     cmd: python src/backtest.py --split hidden --confirm-holdout
     deps:
       - src/backtest.py
       - src/model.py
-      - data/processed/events
+      - data/events
       - models
       - config.yaml
     outs:
-      - data/processed/backtest_logs/trades_position_0_near_hidden.csv
-      - data/processed/backtest_logs/trades_position_1_mid_hidden.csv
-      - data/processed/backtest_logs/trades_position_2_far_hidden.csv
+      - data/backtest_logs/trades_position_0_near_hidden.csv
+      - data/backtest_logs/trades_position_1_mid_hidden.csv
+      - data/backtest_logs/trades_position_2_far_hidden.csv
     frozen: true

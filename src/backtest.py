@@ -146,7 +146,7 @@ if __name__ == "__main__":
 
     evals = {p: evaluate(eval_df, p, feature_cols, models) for p in positions}
 
-    logs_dir = ROOT / "data" / "processed" / "backtest_logs"
+    logs_dir = ROOT / "data" / "backtest_logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n=== backtest (split={args.split}) ===")

@@ -3,6 +3,8 @@
 /data/raw/2022-24/
 /data/raw/dates/
 /data/processed/
+/data/events/
+/data/backtest_logs/
 /data/dist_tables/
 
 # --- Python ---

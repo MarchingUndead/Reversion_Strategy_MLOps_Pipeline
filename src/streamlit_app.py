@@ -1,12 +1,14 @@
 """Streamlit UI for the reversion pipeline.
 
-Three tabs:
+Four tabs:
   1. Event explorer    — run events.run() for a (symbol, year, month, day)
                           and render the per-day overlay.
   2. Sample prediction — enter feature values by hand; load the trained
                           models from ./models/*.pkl; show predictions.
   3. Backtest viewer   — load persisted trade logs and render the equity
                           curve + per-position summary.
+  4. MLflow Serving    — POST a feature row to a running `mlflow models serve`
+                          endpoint and display the returned prediction.
 
 Models are pickled by `python src/model.py` into ./models/. No registry.
 """
@@ -37,10 +39,11 @@ TXN_COST_RATE   = _cfg["backtest"]["txn_cost_rate"]
 st.set_page_config(page_title="Reversion Strategy", layout="wide")
 st.title("Reversion Strategy")
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "Event explorer",
     "Live tick prediction",
     "Backtest viewer",
+    "MLflow Serving",
 ])
 
 
@@ -48,13 +51,13 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     st.header("Event explorer")
     c1, c2, c3, c4 = st.columns(4)
-    symbol    = c1.selectbox("symbol", _cfg["symbols"])
+    symbol    = c1.selectbox("symbol", _cfg["symbols"], key="t1_symbol")
     # 2025 is the hidden test holdout and is intentionally excluded here.
-    year      = c2.number_input("year", min_value=2022, max_value=2024, value=2024, step=1)
-    month_str = c3.selectbox("month", MONTHS, index=7)
-    day_input = c4.text_input("day (1–31 or YYYYMMDD, blank = full month)", value="")
+    year      = c2.number_input("year", min_value=2022, max_value=2024, value=2024, step=1, key="t1_year")
+    month_str = c3.selectbox("month", MONTHS, index=7, key="t1_month")
+    day_input = c4.text_input("day (1–31 or YYYYMMDD, blank = full month)", value="", key="t1_day")
 
-    if st.button("Run events.run()", type="primary"):
+    if st.button("Run events.run()", type="primary", key="t1_submit"):
         with st.spinner("loading processed data and detecting events..."):
             from events import run
             day = int(day_input) if day_input.strip() else None
@@ -125,7 +128,7 @@ with tab2:
     if st.button("Compute features + predict", type="primary"):
         try:
             import numpy as np
-            from model import load_models
+            #from model import load_models
             from preprocess import get_bucket
 
             # ---- derive features ----
@@ -156,8 +159,9 @@ with tab2:
                     f"**Action: do nothing.**"
                 )
             else:
-                # ---- load frozen models + predict ----
-                trio = load_models(positions=[position]).get(position)
+                # ---- load models from mlflow+ predict ----
+                #trio = load_models(positions=[position]).get(position)
+                trio = mlflow.pyfunc.load_model
                 if trio is None:
                     st.error(
                         f"No pickled models for position {position}. "
@@ -241,7 +245,7 @@ with tab2:
 # ------------------------------ tab 3 ------------------------------
 with tab3:
     st.header("Backtest viewer")
-    logs_dir = ROOT / "data" / "processed" / "backtest_logs"
+    logs_dir = ROOT / "data" / "backtest_logs"
     if not logs_dir.exists():
         st.warning(f"No backtest_logs directory at {logs_dir}. Run `python src/backtest.py` first.")
     else:
@@ -280,5 +284,68 @@ with tab3:
                     st.line_chart(equity)
                     st.subheader("raw trades")
                     st.dataframe(combined, use_container_width=True, height=400)
+
+
+# ------------------------------ tab 4 ------------------------------
+with tab4:
+    st.header("MLflow Serving")
+    st.caption(
+        "POSTs a single feature row to a running `mlflow models serve` endpoint. "
+        "Start it from the project root, e.g.: "
+        "`mlflow models serve -m runs:/<run_id>/model_classifier --port 5001 --env-manager=local --no-conda`"
+        "Three different models can be served : model_classifier, model_duration, model_revert"
+    )
+
+    endpoint = st.text_input(
+        "Serving endpoint",
+        value="http://127.0.0.1:5001/invocations",
+        key="t4_endpoint",
+    )
+
+    st.subheader("Feature row")
+    st.caption(f"Order matters — columns sent in config order: {FEATURE_COLS}")
+
+    defaults = {
+        "det_z_score":    2.5,
+        "det_spread":     0.35,
+        "side":           1,
+        "dte":            10,
+        "bucket":         2,
+        "det_dist_std":   0.15,
+        "det_dist_count": 500,
+        "det_fut_ltq":    50,
+        "det_oi_fut":     150000,
+        "det_ltq":        100,
+        "det_fut_ba":     0.10,
+        "det_eq_ba":      0.06,
+    }
+
+    cols = st.columns(4)
+    inputs: dict[str, float] = {}
+    for i, feat in enumerate(FEATURE_COLS):
+        inputs[feat] = cols[i % 4].number_input(
+            feat, value=float(defaults.get(feat, 0.0)), format="%.6f", key=f"t4_{feat}",
+        )
+
+    if st.button("Predict via MLflow", type="primary", key="t4_submit"):
+        import requests
+
+        payload = {
+            "dataframe_split": {
+                "columns": FEATURE_COLS,
+                "data":    [[inputs[f] for f in FEATURE_COLS]],
+            }
+        }
+        try:
+            resp = requests.post(endpoint, json=payload, timeout=10)
+            resp.raise_for_status()
+            body = resp.json()
+            st.subheader("Response")
+            st.json(body)
+            preds = body.get("predictions", body)
+            if isinstance(preds, list) and preds:
+                st.metric("prediction", str(preds[0]))
+        except Exception as e:
+            st.error(f"request failed: {e}")
 
 

@@ -10,7 +10,7 @@ paths:
   test_root:   data/raw/2025
   dates:       data/raw/dates
   processed:   data/processed
-  events:      data/processed/events
+  events:      data/events
 
 symbols:      [BAJFINANCE, RELIANCE]
 months:       [JAN, FEB, MAR, APR, MAY, JUN, JUL, AUG, SEP, OCT, NOV, DEC]
@@ -52,8 +52,8 @@ model:
   #   val       2024-01..2024-12   — primary backtest window (full 2024)
   #   dev_test  2024-07..2024-12   — narrower slice if you want H2-only
   #   hidden    2025-01..2025-12   — one-shot final eval, gated by --confirm-holdout
-  train_range:    ["2022-01", "2023-12"]
-  val_range:      ["2024-01", "2024-12"]
+  train_range:    ["2022-01", "2024-05"]
+  val_range:      ["2024-06", "2024-12"]
   dev_test_range: ["2024-07", "2024-12"]
   hidden_range:   ["2025-01", "2025-12"]
   # RF hyperparameters (consumed by train_position in src/model.py)
