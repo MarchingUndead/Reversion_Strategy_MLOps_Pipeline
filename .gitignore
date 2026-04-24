@@ -30,6 +30,8 @@ env/
 # --- Local artefacts ---
 /models/
 /dvc-storage/
+/mlruns/
+/mlartifacts/
 
 # --- OS / editor ---
 .DS_Store
