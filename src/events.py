@@ -17,7 +17,7 @@ events_dir     = ROOT / _cfg["paths"]["events"]
 months         = _cfg["months"]
 
 
-# ---------- read_processed ----------
+# read_processed
 # Load the full per-symbol processed frame (all dte/bucket bins concatenated).
 # Every row already carries timestamp, spread, dte, bucket, contract,
 # dist_mean, dist_std, ltp (cash) and the bid/ask columns -- no raw I/O or

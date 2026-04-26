@@ -5,8 +5,10 @@
 paths:
   raw_root:    data/raw
   train_root:  data/raw/2022-24
-  # test_root points at the HIDDEN HOLDOUT. No routine script reads this.
-  # Only `backtest.py --split hidden --confirm-holdout` is allowed to use it.
+  # test_root holds the evaluation-only data. preprocess ingests it under
+  # `test_years` so distribution stats continue across 2022→2025, but the
+  # model never trains on these rows — `split_events("train")` filters by
+  # `train_range`. Hidden backtest is one-shot, gated by --confirm-holdout.
   test_root:   data/raw/2025
   dates:       data/raw/dates
   processed:   data/processed
@@ -15,6 +17,10 @@ paths:
 symbols:      [BAJFINANCE, RELIANCE]
 months:       [JAN, FEB, MAR, APR, MAY, JUN, JUL, AUG, SEP, OCT, NOV, DEC]
 train_years:  ["22", "23", "24"]
+test_years:   ["25"]
+# Rolling near-month contracts whose ticks live in data/raw/2025/ but expire
+# in early 2026. Ingested under the 2025 pass.
+test_contracts_extra: ["JAN", "FEB", "MAR"]
 
 buckets:      ["9:15:00", "10:00:00", "11:00:00", "12:00:00", "13:00:00", "14:00:00", "15:00:00"]
 

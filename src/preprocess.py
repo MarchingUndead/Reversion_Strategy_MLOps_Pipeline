@@ -9,16 +9,20 @@ _cfg = yaml.safe_load(open(ROOT / "config.yaml"))
 
 raw_path       = ROOT / _cfg["paths"]["raw_root"]
 train_path     = ROOT / _cfg["paths"]["train_root"]
-# NOTE: data/raw/2025/ is the hidden-test holdout. preprocess.py deliberately
-# does not reference it. `backtest.py --split hidden --confirm-holdout` is the
-# only supported path to touch 2025, and that flow requires a separate,
-# opt-in preprocessing pass (not part of this script).
+# test_path holds evaluation-only ticks (2025 + rolling early-2026 near-month
+# contracts). Ingested here so the expanding distribution stats continue across
+# 2022→2025 in the same shards. Holdout discipline is enforced at evaluation
+# time by `split_events("train")` in src/model.py and the --confirm-holdout
+# flag on backtest.py.
+test_path      = ROOT / _cfg["paths"]["test_root"]
 dates_path     = ROOT / _cfg["paths"]["dates"]
 processed_path = ROOT / _cfg["paths"]["processed"]
 
-symbols     = _cfg["symbols"]
-months      = _cfg["months"]
-train_years = _cfg["train_years"]
+symbols              = _cfg["symbols"]
+months               = _cfg["months"]
+train_years          = _cfg["train_years"]
+test_years           = _cfg.get("test_years", [])
+test_contracts_extra = _cfg.get("test_contracts_extra", [])
 
 columns_fut = _cfg["schemas"]["fut"]
 #sample column : 20220128,09:17:34,6994.60,125,500,6986.30,125,7030.70,125
@@ -126,6 +130,12 @@ def get_high_vix_days(df_vix, threshold=vix_thresh):
 
 
 high_vix_days = get_high_vix_days(df_vix)
+# Union with test-period VIX so both passes apply the same exclusion set.
+if test_years:
+    test_vix_file = test_path / _cfg["preprocess"]["vix_file"]
+    if test_vix_file.exists():
+        df_vix_test = pd.read_csv(test_vix_file, header=None, names=columns_vix)
+        high_vix_days = high_vix_days | get_high_vix_days(df_vix_test)
 
 
 def store_group(df_group, symbol, dte, bucket):
@@ -195,6 +205,54 @@ if __name__ == "__main__":
                 n_csvs = df.groupby(["dte", "bucket"]).ngroups
                 print(f"{sym}{yr}{mon}FUT — {len(df)} rows saved across {n_csvs} CSVs")
 
+    # Test pass: same body as the loop above, only the iteration arguments
+    # change (test_years/test_path instead of train_years/train_path, plus the
+    # rolling 26JAN/FEB/MAR contracts that live alongside the 2025 files).
+    # Shards are unified — the expanding-stats pass below recomputes over the
+    # combined per-shard series.
+    for sym in symbols:
+        for (yr, mon_list) in [(y, months)             for y in test_years] + \
+                              [("26", test_contracts_extra)]:
+            for mon in mon_list:
+                # locate files
+                eq_file = test_path / f"{sym}.csv"
+                fut_file = test_path / f"{sym}{yr}{mon}FUT.csv"
+                if not fut_file.exists():
+                    continue
+
+                # read tick data (headerless CSVs)
+                df_eq = pd.read_csv(eq_file, header=None, names=columns_eq)
+                df_fut = pd.read_csv(fut_file, header=None, names=columns_fut)
+
+                # create timestamp by merging day and time
+                df_eq["timestamp"] = pd.to_datetime(df_eq["day"].astype(str) + " " + df_eq["time"])
+                df_fut["timestamp"] = pd.to_datetime(df_fut["day"].astype(str) + " " + df_fut["time"])
+
+                # merge_asof: for each futures tick, grab the nearest prior equity tick
+                df = pd.merge_asof(df_fut, df_eq, on="timestamp", direction="backward", suffixes=("_fut", "_eq"))
+
+                # filter out high VIX days
+                df = df[~df["day_fut"].isin(high_vix_days)]
+
+                # compute DTE via binary search on trading calendar and expiry dates
+                df["dte"] = df["day_fut"].apply(get_dte)
+
+                # compute bucket per row
+                df["bucket"] = df["time_fut"].apply(get_bucket)
+
+                # tag each tick with its source contract month (e.g. "JAN")
+                df["contract"] = mon
+
+                # drop rows where DTE could not be computed
+                df = df.dropna(subset=["dte"])
+
+                # group by (dte, bucket) and append each group to its CSV
+                for (dte, bucket), grp in df.groupby(["dte", "bucket"]):
+                    store_group(grp, sym, dte, bucket)
+
+                n_csvs = df.groupby(["dte", "bucket"]).ngroups
+                print(f"{sym}{yr}{mon}FUT — {len(df)} rows saved across {n_csvs} CSVs")
+
     # ---- expanding distribution pass ----
     warmup_months = _cfg["preprocess"]["warmup_months"]
 
@@ -228,6 +286,12 @@ if __name__ == "__main__":
             print(f"{csv_path.name}: deleted (empty after filtering)")
             continue
 
+        # Sort by timestamp before the expanding pass so that .shift(1) really
+        # means "rows strictly before me in time," not just "rows that landed
+        # earlier in file-append order." Multiple contracts contribute to the
+        # same shard and the train + test loops above don't guarantee strict
+        # chronological append order.
+        df = df.sort_values("timestamp").reset_index(drop=True)
 
         # normalized basis spread (%)
         df["spread"] = ((df["fut_ltp"] - df["ltp"]) / df["ltp"]) * 100

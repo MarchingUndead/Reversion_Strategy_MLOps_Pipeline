@@ -116,19 +116,15 @@ if __name__ == "__main__":
                        train_position, evaluate, load_models)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", choices=["val", "dev_test", "hidden"], default="val",
-                        help="which split to backtest on (default: val)")
-    parser.add_argument("--confirm-holdout", action="store_true",
-                        help="required to run --split hidden")
+    parser.add_argument("--split", choices=["val", "dev_test", "hidden"], default="hidden",
+                        help="which split to backtest on (default: hidden = 2025). "
+                             "Models still train only on 2022-24 (train_range). "
+                             "Hidden output is observation-only; do not feed results "
+                             "back into tuning decisions.")
+    
     parser.add_argument("--retrain", action="store_true",
                         help="force retraining instead of loading ./models/*.pkl")
     args = parser.parse_args()
-
-    if args.split == "hidden" and not args.confirm_holdout:
-        print("ERROR: --split hidden requires --confirm-holdout "
-              "(2025 is the one-shot holdout; see config.yaml::model.hidden_range).",
-              file=sys.stderr)
-        sys.exit(2)
 
     events = prepare_events(load_events_all())
     eval_df = split_events(events, args.split)

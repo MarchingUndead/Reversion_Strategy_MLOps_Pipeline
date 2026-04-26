@@ -1,0 +1,371 @@
+# promtool unit tests for monitoring/alerts/*.yml
+#
+# Run via:
+#   scripts/test_alerts.ps1     (Windows / PowerShell)
+#   scripts/test_alerts.sh      (bash)
+#
+# Each test feeds synthetic series into Prometheus's rule evaluator and asserts
+# that the named alert reaches the firing state at the expected eval_time, with
+# matching labels AND annotations (annotation strings include {{ $value }}
+# resolved to interpolated floats).
+
+rule_files:
+  - /etc/prometheus/alerts/serving.yml
+  - /etc/prometheus/alerts/system.yml
+  - /etc/prometheus/alerts/infra.yml
+
+evaluation_interval: 1m
+
+tests:
+  # =================================================================
+  # infra.yml
+  # =================================================================
+  - name: ModelServerDown fires after the target stays down for >1m
+    interval: 1m
+    input_series:
+      - series: 'up{job="model-server"}'
+        values: "0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ModelServerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: infra
+              job: model-server
+              alertname: ModelServerDown
+            exp_annotations:
+              summary: "Model server is down"
+              description: "Prometheus cannot scrape job=model-server (target down for >1m)."
+
+  - name: NodeExporterDown fires after >2m
+    interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter"}'
+        values: "0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NodeExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: infra
+              job: node-exporter
+              alertname: NodeExporterDown
+            exp_annotations:
+              summary: "node-exporter is down"
+              description: "System metrics are not being collected."
+
+  - name: NoTraffic fires after 10m of zero request rate
+    interval: 1m
+    input_series:
+      - series: 'prediction_requests_total{endpoint="/invocations",status="2xx"}'
+        values: "0x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: NoTraffic
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: infra
+              alertname: NoTraffic
+            exp_annotations:
+              summary: "No traffic to model server"
+              description: "Zero requests over the last 10 minutes — server up but unused or unreachable from clients."
+
+  # =================================================================
+  # serving.yml
+  # =================================================================
+  - name: HighExceptionRate fires when exceptions exceed 0.1/sec
+    interval: 1m
+    input_series:
+      # 60 errors per minute = 1/sec, well above 0.1/sec threshold
+      - series: 'prediction_errors_total{endpoint="/invocations",exception="ValueError"}'
+        values: "0+60x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HighExceptionRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: serving
+              alertname: HighExceptionRate
+            exp_annotations:
+              summary: "Inference exceptions > 0.1/sec"
+              description: "1.00 exceptions/sec over the last 5m."
+
+  - name: High5xxRate fires when 5xx ratio exceeds 5%
+    interval: 1m
+    input_series:
+      - series: 'prediction_requests_total{endpoint="/invocations",status="5xx"}'
+        values: "0+10x10"
+      - series: 'prediction_requests_total{endpoint="/invocations",status="2xx"}'
+        values: "0+90x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: High5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: serving
+              alertname: High5xxRate
+            exp_annotations:
+              summary: "5xx ratio > 5%"
+              description: "10% of requests returning 5xx over 5m."
+
+  - name: High4xxRate fires when 4xx ratio exceeds 20%
+    interval: 1m
+    input_series:
+      - series: 'prediction_requests_total{endpoint="/invocations",status="4xx"}'
+        values: "0+30x15"
+      - series: 'prediction_requests_total{endpoint="/invocations",status="2xx"}'
+        values: "0+70x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: High4xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: serving
+              alertname: High4xxRate
+            exp_annotations:
+              summary: "4xx ratio > 20% — payload schema drift?"
+              description: "30% of requests returning 4xx over 5m."
+
+  - name: HighLatencyP95 fires when p95 exceeds 1s
+    interval: 1m
+    input_series:
+      # All observations land in (1.0, 2.5] bucket → p95 ≈ 2.425s
+      - series: 'prediction_latency_seconds_bucket{le="0.5",endpoint="/invocations"}'
+        values: "0+0x15"
+      - series: 'prediction_latency_seconds_bucket{le="1.0",endpoint="/invocations"}'
+        values: "0+0x15"
+      - series: 'prediction_latency_seconds_bucket{le="2.5",endpoint="/invocations"}'
+        values: "0+10x15"
+      - series: 'prediction_latency_seconds_bucket{le="+Inf",endpoint="/invocations"}'
+        values: "0+10x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: HighLatencyP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: serving
+              alertname: HighLatencyP95
+            exp_annotations:
+              summary: "p95 latency > 1s"
+              description: "p95 = 2.425s over 5m."
+
+  - name: HighLatencyP99 fires when p99 exceeds 2.5s
+    interval: 1m
+    input_series:
+      # All observations land in (2.5, 5.0] bucket → p99 ≈ 4.975s
+      - series: 'prediction_latency_seconds_bucket{le="2.5",endpoint="/invocations"}'
+        values: "0+0x15"
+      - series: 'prediction_latency_seconds_bucket{le="5.0",endpoint="/invocations"}'
+        values: "0+10x15"
+      - series: 'prediction_latency_seconds_bucket{le="+Inf",endpoint="/invocations"}'
+        values: "0+10x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: HighLatencyP99
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: serving
+              alertname: HighLatencyP99
+            exp_annotations:
+              summary: "p99 latency > 2.5s"
+              description: "p99 = 4.975s over 5m."
+
+  - name: RequestRateSpike fires when current 1m rate exceeds 5x baseline
+    interval: 1m
+    input_series:
+      # Baseline 1 req/min for 30 min, then spike to 200 req/min for 10 min
+      - series: 'prediction_requests_total{endpoint="/invocations",status="2xx"}'
+        values: "0+1x30 30+200x10"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: RequestRateSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: serving
+              alertname: RequestRateSpike
+            exp_annotations:
+              summary: "Request rate 5x baseline"
+              description: "Current 1m rate is more than 5x the 15m rate from 15m ago."
+
+  - name: ZeroRequestSuccess fires when traffic > 0 but 2xx rate is zero
+    interval: 1m
+    input_series:
+      - series: 'prediction_requests_total{endpoint="/invocations",status="2xx"}'
+        values: "0x15"
+      - series: 'prediction_requests_total{endpoint="/invocations",status="5xx"}'
+        values: "0+30x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ZeroRequestSuccess
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: serving
+              alertname: ZeroRequestSuccess
+            exp_annotations:
+              summary: "Server up but every request is failing"
+              description: "Traffic > 0 over 5m, yet zero 2xx responses. Distinct from NoTraffic."
+
+  - name: HighInFlight fires when in-flight inference exceeds 20
+    interval: 1m
+    input_series:
+      - series: 'inference_in_flight{endpoint="/invocations"}'
+        values: "25 25 25 25 25"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HighInFlight
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: serving
+              alertname: HighInFlight
+            exp_annotations:
+              summary: "In-flight inference > 20"
+              description: "25 requests in-flight — server may be saturating."
+
+  - name: ModelLatencyDegraded fires when p95 jumps to 2x its 1h baseline
+    interval: 1m
+    # Baseline phase 0–240m: all observations in (0, 0.1] → baseline p95 ≈ 0.095
+    # Burst phase   240–280m: observations in (1.0, 2.5] → current p95 ≈ 2.425
+    # Eval at t=260m: current 5m window is fully in burst (255–260),
+    #                 offset 1h range 1h window is 140–200m, fully in baseline.
+    input_series:
+      - series: 'prediction_latency_seconds_bucket{le="0.1"}'
+        values: "0+10x240 2400+0x40"
+      - series: 'prediction_latency_seconds_bucket{le="0.5"}'
+        values: "0+10x240 2400+0x40"
+      - series: 'prediction_latency_seconds_bucket{le="1.0"}'
+        values: "0+10x240 2400+0x40"
+      - series: 'prediction_latency_seconds_bucket{le="2.5"}'
+        values: "0+10x240 2400+10x40"
+      - series: 'prediction_latency_seconds_bucket{le="+Inf"}'
+        values: "0+10x240 2400+10x40"
+    alert_rule_test:
+      - eval_time: 260m
+        alertname: ModelLatencyDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: serving
+              alertname: ModelLatencyDegraded
+            exp_annotations:
+              summary: "p95 latency 2x its 1h baseline"
+              description: "p95 over 5m exceeds 2x the p95 from the previous hour — degradation, not absolute breach."
+
+  # =================================================================
+  # system.yml
+  # =================================================================
+  - name: HighCPU fires when CPU busy exceeds 85%
+    interval: 1m
+    input_series:
+      # idle counter increases by 3 per minute = 0.05/sec idle → 95% busy
+      - series: 'node_cpu_seconds_total{mode="idle",cpu="0",instance="node-exporter:9100"}'
+        values: "0+3x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HighCPU
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: system
+              instance: node-exporter:9100
+              alertname: HighCPU
+            exp_annotations:
+              summary: "CPU > 85% on node-exporter:9100"
+              description: "95.0% CPU sustained for 5m."
+
+  - name: HighMemory fires when memory used exceeds 90%
+    interval: 1m
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{instance="node-exporter:9100"}'
+        values: "500000000x10"
+      - series: 'node_memory_MemTotal_bytes{instance="node-exporter:9100"}'
+        values: "8000000000x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HighMemory
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: system
+              instance: node-exporter:9100
+              alertname: HighMemory
+            exp_annotations:
+              summary: "Memory > 90% on node-exporter:9100"
+              description: "93.8% memory used."
+
+  - name: DiskFillingUp fires when rootfs usage exceeds 85%
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/",fstype="ext4",instance="node-exporter:9100"}'
+        values: "1000000000x15"
+      - series: 'node_filesystem_size_bytes{mountpoint="/",fstype="ext4",instance="node-exporter:9100"}'
+        values: "10000000000x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: DiskFillingUp
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: system
+              instance: node-exporter:9100
+              mountpoint: /
+              fstype: ext4
+              alertname: DiskFillingUp
+            exp_annotations:
+              summary: "Disk > 85% on node-exporter:9100 /"
+              description: "90.0% disk used."
+
+  - name: DiskCritical fires when rootfs usage exceeds 95%
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/",fstype="ext4",instance="node-exporter:9100"}'
+        values: "100000000x10"
+      - series: 'node_filesystem_size_bytes{mountpoint="/",fstype="ext4",instance="node-exporter:9100"}'
+        values: "10000000000x10"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: DiskCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              area: system
+              instance: node-exporter:9100
+              mountpoint: /
+              fstype: ext4
+              alertname: DiskCritical
+            exp_annotations:
+              summary: "Disk CRITICAL > 95% on node-exporter:9100 /"
+              description: "99.0% disk used — imminent failure."
+
+  - name: HighLoad fires when load5 exceeds 2x CPU count
+    interval: 1m
+    input_series:
+      # 2 CPUs (cpu=0, cpu=1) → threshold is load5 > 4. Set load5=10.
+      - series: 'node_load5{instance="node-exporter:9100"}'
+        values: "10x15"
+      - series: 'node_cpu_seconds_total{cpu="0",mode="idle",instance="node-exporter:9100"}'
+        values: "0+1x15"
+      - series: 'node_cpu_seconds_total{cpu="1",mode="idle",instance="node-exporter:9100"}'
+        values: "0+1x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighLoad
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              area: system
+              instance: node-exporter:9100
+              alertname: HighLoad
+            exp_annotations:
+              summary: "Load5 > 2x CPU count on node-exporter:9100"
+              description: "5-minute load average exceeds 2x available CPUs."

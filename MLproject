@@ -1,0 +1,11 @@
+name: reversion_strategy_mlops_pipeline
+
+python_env: python_env.yaml
+
+entry_points:
+  main:
+    parameters:
+      rf_n_estimators: {type: int, default: 200}
+      rf_max_depth:    {type: int, default: 10}
+      position:        {type: int, default: 0}
+    command: "python src/mlflow_train.py --rf-n-estimators {rf_n_estimators} --rf-max-depth {rf_max_depth} --position {position}"

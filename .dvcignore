@@ -30,3 +30,7 @@ desktop.ini
 *.log
 *.tmp
 *.bak
+
+# MLflow tracking & artefact stores
+mlruns/
+mlartifacts/

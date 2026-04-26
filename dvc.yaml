@@ -24,14 +24,9 @@ stages:
     outs:
       - data/events
 
-  train:
-    cmd: python src/model.py
-    deps:
-      - src/model.py
-      - data/events
-      - config.yaml
-    outs:
-      - models
+  # Training is owned by MLflow (`src/mlflow_train.py` / `src/mlflow_grid.py`).
+  # No DVC `train` stage; `models/` is not a DVC out. Backtest pulls the model
+  # from MLflow at runtime — see backtest.py wiring (TODO, see report/ISSUES.md I-7).
 
   backtest:
     cmd: python src/backtest.py --split val
@@ -40,7 +35,6 @@ stages:
       - src/model.py
       - src/plots.py
       - data/events
-      - models
       - config.yaml
     outs:
       - data/backtest_logs/trades_position_0_near_val.csv
@@ -53,7 +47,6 @@ stages:
       - src/backtest.py
       - src/model.py
       - data/events
-      - models
       - config.yaml
     outs:
       - data/backtest_logs/trades_position_0_near_hidden.csv
