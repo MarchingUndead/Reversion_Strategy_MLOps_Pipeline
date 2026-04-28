@@ -10,7 +10,6 @@ __pycache__/
 
 # Large data / build artefacts — mounted as volumes at runtime instead.
 data/
-models/
 dvc-storage/
 .dvc/cache/
 .dvc/tmp/

@@ -111,9 +111,30 @@ def backtest(eval_df, label, trade_log_path=None):
     return trades
 
 
+def _load_models_mlflow(positions, stage="Production"):
+    """Load (clf, reg_dur, reg_rev) per position from the MLflow Registry.
+
+    External wrapper — does NOT modify model.py's pipeline functions. Returns
+    {position: trio_or_None}; a None means at least one head failed to load.
+    """
+    import mlflow.sklearn
+    out = {}
+    for p in positions:
+        try:
+            clf     = mlflow.sklearn.load_model(f"models:/reversion-classifier-pos{p}/{stage}")
+            reg_dur = mlflow.sklearn.load_model(f"models:/reversion-duration-pos{p}/{stage}")
+            reg_rev = mlflow.sklearn.load_model(f"models:/reversion-revert-pos{p}/{stage}")
+            out[p] = (clf, reg_dur, reg_rev)
+        except Exception as exc:
+            print(f"[backtest] pos{p}: MLflow load failed "
+                  f"({type(exc).__name__}: {exc})")
+            out[p] = None
+    return out
+
+
 if __name__ == "__main__":
     from model import (load_events_all, prepare_events, split_events,
-                       train_position, evaluate, load_models)
+                       train_position, evaluate)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", choices=["val", "dev_test", "hidden"], default="hidden",
@@ -121,10 +142,17 @@ if __name__ == "__main__":
                              "Models still train only on 2022-24 (train_range). "
                              "Hidden output is observation-only; do not feed results "
                              "back into tuning decisions.")
-    
     parser.add_argument("--retrain", action="store_true",
-                        help="force retraining instead of loading ./models/*.pkl")
+                        help="force in-process retraining instead of loading from MLflow Registry")
+    parser.add_argument("--stage", default="Production",
+                        help="MLflow Registry stage to load (default: Production). "
+                             "Ignored with --retrain.")
+    parser.add_argument("--confirm-holdout", action="store_true",
+                        help="required to backtest --split hidden (one-shot 2025 holdout).")
     args = parser.parse_args()
+
+    if args.split == "hidden" and not args.confirm_holdout:
+        sys.exit("--split hidden requires --confirm-holdout")
 
     events = prepare_events(load_events_all())
     eval_df = split_events(events, args.split)
@@ -133,10 +161,10 @@ if __name__ == "__main__":
     feature_cols = _cfg["model"]["feature_cols"]
     positions    = _cfg["backtest"]["positions"]
 
-    # Load pickled models first; retrain only if missing or --retrain given.
-    models = {} if args.retrain else load_models(positions)
+    # Load from MLflow Registry first; retrain in-process if requested or any head missing.
+    models = {} if args.retrain else _load_models_mlflow(positions, args.stage)
     if args.retrain or any(models.get(p) is None for p in positions):
-        print("[backtest] training models in-process (no pickles found or --retrain)")
+        print("[backtest] training models in-process (--retrain or MLflow load failed)")
         train = split_events(events, "train")
         models = {p: train_position(train, p, feature_cols) for p in positions}
 

@@ -1,0 +1,105 @@
+groups:
+  - name: serving
+    interval: 30s
+    rules:
+      - alert: HighExceptionRate
+        expr: sum(rate(prediction_errors_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          area: serving
+        annotations:
+          summary: "Inference exceptions > 0.1/sec"
+          description: "{{ printf \"%.2f\" $value }} exceptions/sec over the last 5m."
+
+      - alert: High5xxRate
+        expr: |
+          sum(rate(prediction_requests_total{status="5xx"}[5m]))
+            / clamp_min(sum(rate(prediction_requests_total[5m])), 0.001) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          area: serving
+        annotations:
+          summary: "5xx ratio > 5%"
+          description: "{{ $value | humanizePercentage }} of requests returning 5xx over 5m."
+
+      - alert: High4xxRate
+        expr: |
+          sum(rate(prediction_requests_total{status="4xx"}[5m]))
+            / clamp_min(sum(rate(prediction_requests_total[5m])), 0.001) > 0.20
+        for: 5m
+        labels:
+          severity: warning
+          area: serving
+        annotations:
+          summary: "4xx ratio > 20% — payload schema drift?"
+          description: "{{ $value | humanizePercentage }} of requests returning 4xx over 5m."
+
+      - alert: HighLatencyP95
+        expr: histogram_quantile(0.95, sum by (le) (rate(prediction_latency_seconds_bucket[5m]))) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          area: serving
+        annotations:
+          summary: "p95 latency > 1s"
+          description: "p95 = {{ printf \"%.3f\" $value }}s over 5m."
+
+      - alert: HighLatencyP99
+        expr: histogram_quantile(0.99, sum by (le) (rate(prediction_latency_seconds_bucket[5m]))) > 2.5
+        for: 5m
+        labels:
+          severity: warning
+          area: serving
+        annotations:
+          summary: "p99 latency > 2.5s"
+          description: "p99 = {{ printf \"%.3f\" $value }}s over 5m."
+
+      - alert: RequestRateSpike
+        expr: |
+          sum(rate(prediction_requests_total[1m]))
+            > 5 * sum(rate(prediction_requests_total[15m] offset 15m))
+        for: 3m
+        labels:
+          severity: warning
+          area: serving
+        annotations:
+          summary: "Request rate 5x baseline"
+          description: "Current 1m rate is more than 5x the 15m rate from 15m ago."
+
+      - alert: ZeroRequestSuccess
+        expr: |
+          sum(rate(prediction_requests_total[5m])) > 0
+            and
+          sum(rate(prediction_requests_total{status="2xx"}[5m])) == 0
+        for: 5m
+        labels:
+          severity: warning
+          area: serving
+        annotations:
+          summary: "Server up but every request is failing"
+          description: "Traffic > 0 over 5m, yet zero 2xx responses. Distinct from NoTraffic."
+
+      - alert: ModelLatencyDegraded
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(prediction_latency_seconds_bucket[5m])))
+            > 2 *
+          histogram_quantile(0.95, sum by (le) (rate(prediction_latency_seconds_bucket[1h] offset 1h)))
+        for: 10m
+        labels:
+          severity: warning
+          area: serving
+        annotations:
+          summary: "p95 latency 2x its 1h baseline"
+          description: "p95 over 5m exceeds 2x the p95 from the previous hour — degradation, not absolute breach."
+
+      - alert: HighInFlight
+        expr: max(inference_in_flight) > 20
+        for: 2m
+        labels:
+          severity: warning
+          area: serving
+        annotations:
+          summary: "In-flight inference > 20"
+          description: "{{ $value }} requests in-flight — server may be saturating."

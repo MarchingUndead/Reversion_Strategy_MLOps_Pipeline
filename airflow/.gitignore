@@ -1,0 +1,4 @@
+# Airflow runtime artefacts. The directories themselves are recreated by the
+# init container on first boot; we only ignore their contents.
+logs/
+plugins/

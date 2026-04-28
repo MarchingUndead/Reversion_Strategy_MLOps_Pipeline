@@ -32,6 +32,76 @@ MONTHS       = _cfg["months"]
 st.set_page_config(page_title="Reversion Strategy", layout="wide")
 st.title("Reversion Strategy")
 
+
+# ------------------------------ sidebar: registry / model swap ------------------------------
+def _registry_client():
+    """Cached MLflow client. Returns (client, error_str). client is None on error."""
+    try:
+        import mlflow
+        from mlflow import MlflowClient
+        tracking_uri = (
+            __import__("os").environ.get("MLFLOW_TRACKING_URI")
+            or f"file:{(ROOT / 'mlruns').as_posix()}"
+        )
+        mlflow.set_tracking_uri(tracking_uri)
+        return MlflowClient(), None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+with st.sidebar:
+    st.header("Registered models")
+    st.caption("Inspect and swap the currently served model.")
+    client, err = _registry_client()
+    if err:
+        st.error(f"MLflow client unavailable: {err}")
+    else:
+        models = list(client.search_registered_models())
+        if not models:
+            st.info("No registered models. Run the pipeline DAG to populate the registry.")
+        else:
+            names = [m.name for m in models]
+            picked_name = st.selectbox("Model name", names, key="sb_name")
+            versions = list(client.search_model_versions(f"name='{picked_name}'"))
+            versions.sort(key=lambda v: int(v.version), reverse=True)
+            v_labels = [f"v{v.version} ({v.current_stage})" for v in versions]
+            v_idx = st.selectbox("Version", range(len(versions)),
+                                 format_func=lambda i: v_labels[i], key="sb_version")
+            picked_version = versions[v_idx].version
+
+            colA, colB = st.columns(2)
+            if colA.button("Pin this version", key="sb_apply"):
+                import subprocess as _sp
+                cmd = ["python", str(ROOT / "scripts" / "swap_model.py"),
+                       "--name", picked_name, "--version", str(picked_version)]
+                with st.spinner("swapping model and bouncing serving container..."):
+                    proc = _sp.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
+                if proc.returncode == 0:
+                    st.success(f"served model -> {picked_name}/v{picked_version}")
+                else:
+                    st.error(f"swap failed (rc={proc.returncode})")
+                with st.expander("output"):
+                    st.code((proc.stdout or "") + "\n" + (proc.stderr or ""))
+            if colB.button("Promote to Production", key="sb_promote"):
+                try:
+                    client.transition_model_version_stage(
+                        name=picked_name, version=picked_version,
+                        stage="Production", archive_existing_versions=True,
+                    )
+                    st.success(f"{picked_name}/v{picked_version} -> Production")
+                except Exception as e:
+                    st.error(f"promote failed: {type(e).__name__}: {e}")
+
+    st.divider()
+    st.caption("Currently served")
+    try:
+        import requests as _rq
+        h = _rq.get("http://serving:5002/health", timeout=3).json()
+        st.code(h.get("model_uri", "?"))
+    except Exception:
+        st.caption("(serving container unreachable)")
+
+
 tab1, tab2, tab3 = st.tabs([
     "Event explorer",
     "Backtest viewer",
@@ -112,15 +182,16 @@ with tab2:
 with tab3:
     st.header("MLflow Serving")
     st.caption(
-        "POSTs a single feature row to a running `mlflow models serve` endpoint. "
-        "Start one from the project root, e.g.: "
-        "`mlflow models serve -m runs:/<run_id>/model_classifier --port 5001 --env-manager=local --no-conda`. "
-        "Three artefacts can be served independently: `model_classifier`, `model_duration`, `model_revert`."
+        "POSTs a single feature row to the FastAPI model server. "
+        "In docker-compose: pre-filled to `http://serving:5002/invocations` "
+        "(compose DNS — works because Streamlit and the serving service share the default network). "
+        "For host-side `mlflow models serve`, override to "
+        "`http://localhost:5001/invocations`."
     )
 
     endpoint = st.text_input(
         "Serving endpoint",
-        value="http://127.0.0.1:5001/invocations",
+        value="http://serving:5002/invocations",
         key="t3_endpoint",
     )
 

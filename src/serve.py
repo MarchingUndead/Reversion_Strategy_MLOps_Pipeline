@@ -36,9 +36,36 @@ from src.serve_metrics import (
     PREDICTION_SCORE,
 )
 
-MODEL_URI = os.environ.get("MODEL_URI")
+def _resolve_model_uri(raw: str) -> str:
+    """Translate `auto:<name>` -> `models:/<name>/Production` (or the latest
+    version if no Production stage exists). `runs:/...` and `models:/...` URIs
+    pass through unchanged. External wrapper — preserves the existing
+    load_model call unchanged."""
+    if not raw or not raw.startswith("auto:"):
+        return raw
+    name = raw.split("auto:", 1)[1].strip()
+    from mlflow import MlflowClient
+    client = MlflowClient()
+    prod = client.get_latest_versions(name, stages=["Production"])
+    if prod:
+        v = prod[0]
+        print(f"[serve] auto: {name} -> models:/{name}/Production "
+              f"(v{v.version}, run={v.run_id})")
+        return f"models:/{name}/Production"
+    none = client.get_latest_versions(name, stages=["None"])
+    if none:
+        v = none[0]
+        print(f"[serve] auto: {name} no Production stage; "
+              f"falling back to v{v.version}")
+        return f"models:/{name}/{v.version}"
+    raise SystemExit(f"auto:{name}: no versions found in MLflow Registry")
+
+
+MODEL_URI = _resolve_model_uri(os.environ.get("MODEL_URI", ""))
 if not MODEL_URI:
-    raise SystemExit("MODEL_URI env var is required (e.g. runs:/<run_id>/model_classifier)")
+    raise SystemExit("MODEL_URI env var is required "
+                     "(e.g. runs:/<run_id>/model_classifier, "
+                     "models:/<name>/Production, or auto:<name>)")
 
 print(f"loading model from {MODEL_URI} ...")
 _model = mlflow.pyfunc.load_model(MODEL_URI)

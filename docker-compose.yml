@@ -1,39 +1,160 @@
-# Minimal stack: just Streamlit.
+# All services for the reversion pipeline.
 #
-# Run the batch pipeline on the host (via the venv) and mount ./models,
-# ./data, and ./config.yaml into the container so Streamlit sees them.
+#   docker compose up -d        # bring up the WHOLE app
+#   docker compose down         # shut it all down (preserves volumes)
+#   docker compose down -v      # ...and nuke volumes — fresh start
 #
-#   docker compose up -d                # starts streamlit at :8501
-#   docker compose run --rm pipeline python src/model.py      # optional
-#   docker compose down
+# Airflow UI: http://localhost:8080  login: airflow / airflow
+# Streamlit:  http://localhost:8501
+# Grafana:    http://localhost:3000  login: admin   / admin
+# Prometheus: http://localhost:9090
+# Alertmgr:   http://localhost:9093
+#
+# Airflow runs on LocalExecutor + Postgres (no Celery / Redis / worker). Tasks
+# execute as scheduler subprocesses; the `grid_search` Pool still caps mapped-
+# task concurrency. To swap in CeleryExecutor later, restore the redis service,
+# add an airflow-worker service, and flip AIRFLOW__CORE__EXECUTOR.
+
+# ---------- shared config for all airflow services ----------
+# All airflow services + streamlit run the same `reversion:local` image.
+# Pipeline deps are baked in (Dockerfile FROM apache/airflow:2.10.3) — no
+# pip-install at boot. SMTP creds come from .env (used both by the airflow
+# email-on-failure path via AIRFLOW__SMTP__* and by the EmailOperator via the
+# `smtp_default` connection that airflow-init provisions).
+x-airflow-common: &airflow-common
+  image: reversion:local
+  env_file: .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Shared signing key (from .env) so webserver + scheduler agree on log
+    # fetch tokens. Without it, each container generates its own random key
+    # and the UI shows 403 Forbidden when reading task logs.
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-reversion-local-dev-fallback-secret}
+    # Self-heal DAG visibility: rescan dags/ every 30s so a freshly-dropped
+    # DAG file shows up in the UI without `airflow dags reserialize`.
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: '30'
+    # SMTP for `email_on_failure=True` retries (old-style send_email path).
+    # The EmailOperator (new-style) reads the `smtp_default` connection that
+    # airflow-init provisions below — both paths are wired.
+    AIRFLOW__SMTP__SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+    AIRFLOW__SMTP__SMTP_PORT: ${SMTP_PORT:-587}
+    AIRFLOW__SMTP__SMTP_STARTTLS: 'True'
+    AIRFLOW__SMTP__SMTP_SSL: 'False'
+    AIRFLOW__SMTP__SMTP_USER: ${SMTP_USER:-}
+    AIRFLOW__SMTP__SMTP_PASSWORD: ${SMTP_APP_PASSWORD:-}
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: ${SMTP_USER:-airflow@example.com}
+    PROJECT_ROOT: /opt/airflow/project
+    AIRFLOW_ALERT_EMAIL: ${ALERT_TO:-you@example.com}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    # Logs use a named volume because Windows Docker Desktop bind-mounts the
+    # host dir as uid 0 / 1000 — neither is the airflow user (50000), so the
+    # scheduler's DAG processor crashes with PermissionError while creating
+    # /opt/airflow/logs/scheduler/<date>/*.log and silently drops every DAG
+    # parse. Named volume = Docker manages perms; airflow user can write.
+    # Inspect with: docker compose logs airflow-scheduler
+    #            or: docker compose exec airflow-scheduler tail -f /opt/airflow/logs/...
+    - airflow_logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./src:/opt/airflow/project/src:ro
+    - ./scripts:/opt/airflow/project/scripts:ro
+    - ./config.yaml:/opt/airflow/project/config.yaml:ro
+    - ./data:/opt/airflow/project/data
+    - ./mlruns:/opt/airflow/project/mlruns
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
 
 services:
   streamlit:
     build: .
     image: reversion:local
     container_name: reversion-streamlit
+    working_dir: /app
     restart: unless-stopped
     env_file: .env
+    # Override the airflow base image's /entrypoint script — it treats unknown
+    # first args as airflow subcommands and would turn `streamlit run ...` into
+    # `airflow streamlit run ...`. `command: []` discards the image CMD so it
+    # isn't appended as args to the new entrypoint.
+    entrypoint:
+      - streamlit
+      - run
+      - /app/src/streamlit_app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    command: []
     ports:
       - "${STREAMLIT_PORT:-8501}:8501"
     volumes:
       - ./data:/app/data:ro
-      - ./models:/app/models:ro
       - ./config.yaml:/app/config.yaml:ro
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./mlruns:/app/mlruns:ro
+      # MLflow file-store meta.yaml records absolute artifact paths from the
+      # writer container. The Airflow scheduler writes runs at
+      # /opt/airflow/project/mlruns/..., so other containers must mount the
+      # same host dir at THAT path too, or registry lookups fail with
+      # "No such file or directory: '/opt/airflow/project/mlruns/.../artifacts/...'".
+      # Same physical bytes; both paths exist for cross-container portability.
+      - ./mlruns:/opt/airflow/project/mlruns:ro
 
-  # Optional: run a pipeline stage inside the image.
-  #   docker compose run --rm pipeline python src/model.py
-  pipeline:
+  # MLflow tracking + Registry UI. Same unified image (mlflow already in
+  # requirements.txt); reads/writes the existing file store at ./mlruns.
+  mlflow-ui:
     image: reversion:local
-    container_name: reversion-pipeline
-    profiles: ["batch"]
-    env_file: .env
+    container_name: reversion-mlflow-ui
+    working_dir: /app
+    restart: unless-stopped
+    entrypoint:
+      - mlflow
+      - ui
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=file:/app/mlruns
+    command: []
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
     volumes:
-      - ./data:/app/data
-      - ./models:/app/models
+      - ./mlruns:/app/mlruns
+      - ./mlruns:/opt/airflow/project/mlruns      # see note in streamlit service
+
+  # FastAPI model server (src/serve.py). MODEL_URI must be set in .env (an
+  # MLflow Registry URI like `models:/reversion-classifier-pos0/Production`,
+  # or a `runs:/<run_id>/<artifact>` URI). serve.py raises SystemExit at
+  # import if MODEL_URI is empty (tracked as I-23) so an unset MODEL_URI on a
+  # fresh clone shows up as a restart loop, not a silent ghost service.
+  serving:
+    image: reversion:local
+    container_name: reversion-serving
+    working_dir: /app
+    restart: unless-stopped
+    env_file: .env
+    entrypoint:
+      - uvicorn
+      - src.serve:app
+      - --host=0.0.0.0
+      - --port=5002
+    command: []
+    ports:
+      - "${SERVE_PORT:-5002}:5002"
+    volumes:
+      - ./src:/app/src:ro
       - ./config.yaml:/app/config.yaml:ro
-    entrypoint: ["python"]
-    command: ["src/model.py"]
+      # mlruns must be writable: when load_model resolves models:/<name>/<stage>,
+      # MLflow drops a registered_model_meta sidecar next to the artifacts.
+      # Read-only causes [Errno 30] Read-only file system on first load.
+      - ./mlruns:/app/mlruns
+      - ./mlruns:/opt/airflow/project/mlruns      # see note in streamlit service
 
   # ------------------------------------------------------------------
   # Monitoring stack. Scrapes src/serve.py running on the HOST at port 5002.
@@ -51,8 +172,6 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alerts:/etc/prometheus/alerts:ro
       - prometheus_data:/prometheus
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       - alertmanager
 
@@ -118,8 +237,119 @@ services:
     ports:
       - "${NODE_EXPORTER_PORT:-9100}:9100"
 
+  # ------------------------------------------------------------------
+  # Airflow stack (LocalExecutor + Postgres).
+  # postgres = metadata DB; init = idempotent setup; scheduler runs tasks in-process.
+  # ------------------------------------------------------------------
+  postgres:
+    image: postgres:13
+    container_name: reversion-airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: reversion-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        # Best-effort chown for the bind-mounted dirs (no-op on Windows
+        # Docker Desktop, which doesn't propagate ownership to the host —
+        # but harmless and helpful on Linux/WSL hosts).
+        chown -R "$${AIRFLOW_UID:-50000}:0" /opt/airflow/dags /opt/airflow/plugins /opt/airflow/logs || true
+        airflow db migrate
+        airflow users create \
+          --username airflow --password airflow \
+          --firstname Airflow --lastname Admin \
+          --role Admin --email airflow@example.com || true
+        airflow pools set grid_search 2 "Cap concurrency for the grid sweep" || true
+        # fs_default connection is required by FileSensor; not auto-provisioned
+        # by airflow init. extras.path="/" lets the sensor accept absolute paths.
+        airflow connections delete fs_default >/dev/null 2>&1 || true
+        airflow connections add fs_default \
+          --conn-type fs \
+          --conn-extra '{"path":"/"}' || true
+        echo "init: fs_default connection provisioned"
+        if [ -n "$${SMTP_USER:-}" ] && [ -n "$${SMTP_APP_PASSWORD:-}" ]; then
+          # Idempotent — delete-then-add picks up rotated credentials.
+          # Extras keys are the ones airflow.providers.smtp.hooks.smtp.SmtpHook
+          # actually reads in 2.10+:
+          #   disable_ssl=true   -> don't use implicit SSL (port 465 mode)
+          #   disable_tls=false  -> DO use STARTTLS (port 587 / Gmail)
+          # The legacy keys smtp_starttls/smtp_ssl are silently ignored, which
+          # leaves both disable_* defaults at false -> implicit SSL on 587 ->
+          # ssl.SSLError: WRONG_VERSION_NUMBER. from_email controls the
+          # "From:" header on outgoing mail.
+          airflow connections delete smtp_default >/dev/null 2>&1 || true
+          airflow connections add smtp_default \
+            --conn-type smtp \
+            --conn-host "$${SMTP_HOST:-smtp.gmail.com}" \
+            --conn-port "$${SMTP_PORT:-587}" \
+            --conn-login "$${SMTP_USER}" \
+            --conn-password "$${SMTP_APP_PASSWORD}" \
+            --conn-extra "{\"disable_ssl\":true,\"disable_tls\":false,\"from_email\":\"$${SMTP_USER}\",\"timeout\":30,\"retry_limit\":2}"
+          echo "init: smtp_default connection provisioned (host=$${SMTP_HOST:-smtp.gmail.com}, user=$${SMTP_USER}, mode=STARTTLS)"
+        else
+          echo "init: SMTP_USER / SMTP_APP_PASSWORD not set in .env; skipping smtp_default. EmailOperator will fail until configured."
+        fi
+        echo "init: done"
+    user: "0:0"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: reversion-airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: reversion-airflow-scheduler
+    # Stable hostname so webserver can fetch task logs via
+    # http://airflow-scheduler:8793/log/...  Without it, task instances are
+    # recorded with an empty hostname and the UI shows
+    #   "Could not read served logs: Invalid URL 'http://:8793/log/...'"
+    hostname: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
 volumes:
   prometheus_data:
   grafana_data:
   alertmanager_data:
   alertmanager_config:
+  postgres-db-volume:
+  airflow_logs:

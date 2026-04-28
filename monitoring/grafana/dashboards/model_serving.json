@@ -1,0 +1,220 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "description": "Per-endpoint serving metrics for src/serve.py. Story: top row = throughput + latency, middle = errors, bottom = saturation + payload + provenance.",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate (req/s)",
+      "description": "1m rate of all HTTP requests, split by endpoint. Linear scale.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (endpoint) (rate(prediction_requests_total[1m]))",
+          "legendFormat": "{{endpoint}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 2,
+      "title": "Latency (seconds) — p50 / p95 / p99",
+      "description": "Histogram quantiles over a 5m window. Watch for divergence between p50 and p95 (tail saturation).",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (le, endpoint) (rate(prediction_latency_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{endpoint}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(prediction_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{endpoint}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, sum by (le, endpoint) (rate(prediction_latency_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{endpoint}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 3,
+      "title": "Error rate (5xx + exceptions per sec)",
+      "description": "5xx responses vs. uncaught exceptions. Diverges only when exception → 5xx mapping breaks.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (endpoint) (rate(prediction_errors_total[1m]))",
+          "legendFormat": "exceptions {{endpoint}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (endpoint) (rate(prediction_requests_total{status=\"5xx\"}[1m]))",
+          "legendFormat": "5xx {{endpoint}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 4,
+      "title": "Model server up/down",
+      "description": "Prometheus scrape health. Red = target down for the last evaluation.",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 16},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "up{job=\"model-server\"}",
+          "legendFormat": "model-server"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "red"}, {"value": 1, "color": "green"}]},
+          "color": {"mode": "thresholds"}
+        }
+      },
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"}
+    },
+    {
+      "id": 5,
+      "title": "In-flight inference",
+      "description": "Concurrent requests being served. Sustained > 20 fires HighInFlight alert.",
+      "type": "gauge",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 16},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "max(inference_in_flight)",
+          "legendFormat": "in-flight"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 50,
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 10, "color": "yellow"}, {"value": 20, "color": "red"}]}
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Model provenance",
+      "description": "Static labels from model_info gauge. Pin a dashboard to a specific git_commit / mlflow_run_id when investigating regressions.",
+      "type": "table",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "model_info",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "Value": true, "__name__": true, "instance": true, "job": true, "service": true}}}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Status code split (req/s)",
+      "description": "Stacked rate by HTTP status class. 4xx surges → schema drift; 5xx surges → server fault.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (status) (rate(prediction_requests_total[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}, "custom": {"stacking": {"mode": "normal"}}}}
+    },
+    {
+      "id": 8,
+      "title": "4xx ratio",
+      "description": "Same expression as the High4xxRate alert. Sustained > 20% suggests payload schema drift.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(prediction_requests_total{status=\"4xx\"}[5m])) / clamp_min(sum(rate(prediction_requests_total[5m])), 0.001)",
+          "legendFormat": "4xx ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 0.2, "color": "red"}]}
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Average rows per /invocations request",
+      "description": "Mean payload size from the payload_rows Summary. Spikes correlate with latency p99 spikes.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "rate(payload_rows_sum[5m]) / clamp_min(rate(payload_rows_count[5m]), 0.001)",
+          "legendFormat": "rows/req"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "palette-classic"}}}
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["mlops", "serving"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Model Serving",
+  "uid": "model-serving",
+  "version": 2,
+  "weekStart": ""
+}

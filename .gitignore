@@ -30,7 +30,6 @@ env/
 *.log
 
 # --- Local artefacts ---
-/models/
 /dvc-storage/
 /mlruns/
 /mlartifacts/
@@ -43,4 +42,3 @@ desktop.ini
 .idea/
 *.swp
 *.swo
-/models

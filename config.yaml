@@ -74,3 +74,18 @@ backtest:
   order_size:      1          # 1 lot per trade
   txn_cost_rate:   0.0001     # 0.01% of notional, charged on each leg
 
+# --- model-architecture grid sweep --------------------------------------------
+# Cartesian product of (positions x model x n_estimators x max_depth x lr).
+# Consumed by the Airflow DAG (dynamic mapping). Currently the smallest
+# possible sweep: rf only, one hyperparam combo per position. With 3 positions
+# this yields 3 mapped tasks — completes in ~1 minute under the grid_search
+# pool. Scale up by lengthening the lists below or re-enabling xgb.
+grid:
+  rf:
+    n_estimators:  [200]
+    max_depth:     [10]
+    learning_rate: [0.1]        # ignored by rf, kept for symmetry
+  xgb:
+    n_estimators:  [200]
+    max_depth:     [5]
+    learning_rate: [0.1]

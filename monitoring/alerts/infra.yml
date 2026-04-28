@@ -1,0 +1,33 @@
+groups:
+  - name: infra
+    interval: 30s
+    rules:
+      - alert: ModelServerDown
+        expr: up{job="model-server"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          area: infra
+        annotations:
+          summary: "Model server is down"
+          description: "Prometheus cannot scrape job=model-server (target down for >1m)."
+
+      - alert: NodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          area: infra
+        annotations:
+          summary: "node-exporter is down"
+          description: "System metrics are not being collected."
+
+      - alert: NoTraffic
+        expr: sum(rate(prediction_requests_total[5m])) == 0
+        for: 10m
+        labels:
+          severity: warning
+          area: infra
+        annotations:
+          summary: "No traffic to model server"
+          description: "Zero requests over the last 10 minutes — server up but unused or unreachable from clients."

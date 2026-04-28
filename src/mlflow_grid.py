@@ -19,8 +19,6 @@ Wrapper: scripts/grid_search.sh
 from __future__ import annotations
 
 import argparse
-import contextlib
-import os
 import sys
 from pathlib import Path
 
@@ -29,25 +27,57 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-import numpy as np
 import mlflow
-import mlflow.sklearn
 
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import model as M
-from sklearn.metrics import mean_absolute_error, f1_score, accuracy_score
+from mlflow_utils import compute_head_metrics, log_three_heads, start_run
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.preprocessing import LabelEncoder
+
+
+class XGBStringClassifier(BaseEstimator, ClassifierMixin):
+    """sklearn-compatible wrapper that pairs a fitted XGBClassifier with its
+    LabelEncoder so .predict() returns the original string labels.
+
+    Why: XGBoost requires numeric class targets, so mlflow_grid LabelEncodes
+    before fit. The raw fitted XGB produces ints on .predict(); downstream
+    consumers (backtest.evaluate, classification_report) expect strings and
+    crash with "Mix of label input types". Logging this wrapper instead of
+    the bare XGBClassifier closes the loop.
+
+    Note: We do NOT re-fit. The model is fitted externally and passed in.
+    """
+
+    def __init__(self, model=None, label_encoder=None):
+        self.model = model
+        self.label_encoder = label_encoder
+
+    def fit(self, X, y=None):
+        return self  # already fitted upstream
+
+    def predict(self, X):
+        return self.label_encoder.inverse_transform(self.model.predict(X))
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+    @property
+    def classes_(self):
+        return self.label_encoder.classes_
 
 
 def build_models(model_type, n_estimators, max_depth, learning_rate, random_state):
     """Return three unfitted estimators: (classifier, duration_regressor, revert_regressor)."""
     if model_type == "rf":
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+        # n_jobs=1 inside each task: pool runs 2 mapped tasks in parallel, and
+        # n_jobs=-1 inside both grabs all cores -> CPU thrashing -> tasks hang.
         common = dict(n_estimators=n_estimators, max_depth=max_depth,
-                      n_jobs=-1, random_state=random_state)
+                      n_jobs=1, random_state=random_state)
         return (
             RandomForestClassifier(**common),
             RandomForestRegressor(**common),
@@ -55,9 +85,12 @@ def build_models(model_type, n_estimators, max_depth, learning_rate, random_stat
         )
     if model_type == "xgb":
         import xgboost as xgb
+        # Same reason: each task stays on 1 core so 2 parallel xgb tasks don't
+        # fight over all cores. Drops per-task wall time vs n_jobs=-1 in this
+        # specific 2-tasks-in-pool topology.
         common = dict(n_estimators=n_estimators, max_depth=max_depth,
                       learning_rate=learning_rate, random_state=random_state,
-                      n_jobs=-1, tree_method="hist")
+                      n_jobs=1, tree_method="hist")
         return (
             xgb.XGBClassifier(eval_metric="mlogloss", **common),
             xgb.XGBRegressor(**common),
@@ -112,19 +145,9 @@ def main():
     )
 
     # --- MLflow run -------------------------------------------------------
-    if mlflow.active_run() is None:
-        tracking_uri = (os.environ.get("MLFLOW_TRACKING_URI")
-                        or f"file:{(ROOT / 'mlruns').as_posix()}")
-        experiment   = (args.experiment
-                        or os.environ.get("MLFLOW_EXPERIMENT_NAME")
-                        or "reversion-grid")
-        mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment(experiment)
-        run_ctx = mlflow.start_run()
-    else:
-        run_ctx = contextlib.nullcontext(mlflow.active_run())
-
-    with run_ctx:
+    with start_run("reversion-grid",
+                   override_experiment=args.experiment,
+                   tracking_root=ROOT / "mlruns"):
         mlflow.set_tags({
             "model_type": args.model,
             "position":   str(args.position),
@@ -149,32 +172,25 @@ def main():
         pred_dur   = reg_dur.predict(X_val)
         pred_rev   = reg_rev.predict(X_val)
 
-        f1   = float(f1_score(val_sub["klass"], pred_k, average="macro", zero_division=0))
-        acc  = float(accuracy_score(val_sub["klass"], pred_k))
-        mdur = float(mean_absolute_error(val_sub["duration_sec"], pred_dur))
-        mrev = float(mean_absolute_error(val_sub["revert_delta"], pred_rev))
-        rdur = float(np.sqrt(np.mean((val_sub["duration_sec"] - pred_dur) ** 2)))
-        rrev = float(np.sqrt(np.mean((val_sub["revert_delta"] - pred_rev) ** 2)))
+        metrics = compute_head_metrics(
+            val_sub["klass"],        pred_k,
+            val_sub["duration_sec"], pred_dur,
+            val_sub["revert_delta"], pred_rev,
+        )
+        mlflow.log_metrics(metrics)
 
-        mlflow.log_metrics({
-            "n_test":        float(len(val_sub)),
-            "accuracy":      acc,
-            "f1_macro":      f1,
-            "mae_duration":  mdur,
-            "mae_revert":    mrev,
-            "rmse_duration": rdur,
-            "rmse_revert":   rrev,
-        })
-
-        mlflow.sklearn.log_model(clf,     artifact_path="model_classifier")
-        mlflow.sklearn.log_model(reg_dur, artifact_path="model_duration")
-        mlflow.sklearn.log_model(reg_rev, artifact_path="model_revert")
+        # For XGB, log the wrapper (model + label encoder) so consumers get
+        # strings back. RF naturally returns strings; log it as-is.
+        clf_to_log = (XGBStringClassifier(model=clf, label_encoder=le)
+                      if le is not None else clf)
+        log_three_heads(clf_to_log, reg_dur, reg_rev)
 
         run_id = mlflow.active_run().info.run_id
         lr_str = f"{args.learning_rate:g}" if args.model == "xgb" else "-"
         print(f"[grid] model={args.model} pos={args.position} "
               f"n_est={args.n_estimators} max_depth={args.max_depth} lr={lr_str}  "
-              f"f1={f1:.4f} acc={acc:.4f} mae_dur={mdur:.1f} mae_rev={mrev:.3f}  "
+              f"f1={metrics['f1_macro']:.4f} acc={metrics['accuracy']:.4f} "
+              f"mae_dur={metrics['mae_duration']:.1f} mae_rev={metrics['mae_revert']:.3f}  "
               f"run_id={run_id}")
 
 

@@ -2,7 +2,6 @@
 # One event row per detection: det/ext/res snapshots + session metadata.
 # Columns described in src/events.ipynb (extract_events cell).
 
-import pickle
 from pathlib import Path
 
 import numpy as np
@@ -20,8 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _cfg = yaml.safe_load(open(ROOT / "config.yaml"))
 
 events_path = ROOT / _cfg["paths"]["events"]
-MODELS_DIR  = ROOT / "models"
-MONTHS      = _cfg["months"]
+months      = _cfg["months"]
 
 
 def load_events_all():
@@ -110,10 +108,8 @@ def evaluate(test_df, position, feature_cols, models):
     return sub
 
 
-# ==================================================================
 # Additive helpers used by backtest.py and streamlit_app.py.
 # The functions above are untouched.
-# ==================================================================
 
 def _slice_by_range(events, range_pair):
     """Filter events whose det_timestamp falls in [start_ym, end_ym] inclusive.
@@ -129,7 +125,7 @@ def prepare_events(events):
     """Add session_month, contract_month, position, targets, derived features."""
     events = events.copy()
     events["session_month"]  = events["day_fut"].apply(_session_month_from_day)
-    events["contract_month"] = events["contract"].map({m: i for i, m in enumerate(MONTHS)})
+    events["contract_month"] = events["contract"].map({m: i for i, m in enumerate(months)})
     events["position"]       = (events["contract_month"] - events["session_month"]) % 12
     events = events[events["position"].isin([0, 1, 2])].reset_index(drop=True)
 
@@ -150,18 +146,6 @@ def split_events(events, split):
     return _slice_by_range(events, _cfg["model"][key])
 
 
-def save_models(models, out_dir=MODELS_DIR):
-    """Persist the {position: (clf, reg_dur, reg_rev)} dict to pickle files."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for p, trio in models.items():
-        if trio is None:
-            continue
-        clf, reg_dur, reg_rev = trio
-        with open(out_dir / f"classifier_pos{p}.pkl", "wb") as f: pickle.dump(clf, f)
-        with open(out_dir / f"duration_pos{p}.pkl",   "wb") as f: pickle.dump(reg_dur, f)
-        with open(out_dir / f"revert_pos{p}.pkl",     "wb") as f: pickle.dump(reg_rev, f)
-    print(f"saved models -> {out_dir}")
 
 
 def eval_metrics(eval_df):
@@ -180,20 +164,6 @@ def eval_metrics(eval_df):
     }
 
 
-def load_models(positions=(0, 1, 2), in_dir=MODELS_DIR):
-    """Inverse of save_models — returns {position: (clf, reg_dur, reg_rev)}.
-    Missing files produce None for that position."""
-    in_dir = Path(in_dir)
-    out = {}
-    for p in positions:
-        try:
-            with open(in_dir / f"classifier_pos{p}.pkl", "rb") as f: clf     = pickle.load(f)
-            with open(in_dir / f"duration_pos{p}.pkl",   "rb") as f: reg_dur = pickle.load(f)
-            with open(in_dir / f"revert_pos{p}.pkl",     "rb") as f: reg_rev = pickle.load(f)
-            out[p] = (clf, reg_dur, reg_rev)
-        except FileNotFoundError:
-            out[p] = None
-    return out
 
 
 if __name__ == "__main__":
@@ -217,8 +187,6 @@ if __name__ == "__main__":
 
     models = {p: train_position(train, p, feature_cols) for p in positions}
     evals  = {p: evaluate(val, p, feature_cols, models)  for p in positions}
-    save_models(models)
-
     for p in positions:
         m = eval_metrics(evals.get(p))
         if m:

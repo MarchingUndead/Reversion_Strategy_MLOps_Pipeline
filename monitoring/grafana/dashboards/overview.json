@@ -1,0 +1,158 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [
+    {"title": "Model Serving", "type": "dashboards", "tags": ["serving"], "asDropdown": false, "includeVars": false, "keepTime": true, "targetBlank": false},
+    {"title": "System Metrics", "type": "dashboards", "tags": ["system"], "asDropdown": false, "includeVars": false, "keepTime": true, "targetBlank": false},
+    {"title": "Alertmanager UI", "type": "link", "url": "http://localhost:9093", "targetBlank": true, "icon": "external link"},
+    {"title": "Prometheus UI", "type": "link", "url": "http://localhost:9090", "targetBlank": true, "icon": "external link"}
+  ],
+  "liveNow": false,
+  "description": "Top-level health view. Story flows top-to-bottom: scrape health → app throughput/latency → host resources → currently firing alerts.",
+  "panels": [
+    {"id": 1, "type": "row", "title": "Service health", "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}, "collapsed": false, "panels": []},
+    {
+      "id": 2,
+      "title": "model-server",
+      "description": "1 = Prometheus successfully scraped /metrics on the last attempt.",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 1},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "up{job=\"model-server\"}"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}],
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "red"}, {"value": 1, "color": "green"}]},
+          "color": {"mode": "thresholds"}
+        }
+      },
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
+    },
+    {
+      "id": 3,
+      "title": "node-exporter",
+      "description": "1 = host metrics exporter reachable.",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 1},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "up{job=\"node-exporter\"}"}],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}],
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "red"}, {"value": 1, "color": "green"}]},
+          "color": {"mode": "thresholds"}
+        }
+      },
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
+    },
+    {
+      "id": 4,
+      "title": "Active alerts",
+      "description": "Count of alerts currently in firing state, summed across all rule files.",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 1},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "count(ALERTS{alertstate=\"firing\"}) or vector(0)"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}, {"value": 1, "color": "yellow"}, {"value": 3, "color": "red"}]},
+          "color": {"mode": "thresholds"}
+        }
+      },
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
+    },
+    {"id": 5, "type": "row", "title": "Application — throughput & latency", "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5}, "collapsed": false, "panels": []},
+    {
+      "id": 6,
+      "title": "Request rate (req/s)",
+      "description": "1m rate by endpoint. Linear scale. Same expr as the model_serving dashboard.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 6},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "sum by (endpoint) (rate(prediction_requests_total[1m]))", "legendFormat": "{{endpoint}}"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 7,
+      "title": "p95 latency (s)",
+      "description": "95th percentile latency over 5m. Same series feeds HighLatencyP95 alert at >1s.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 6},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "histogram_quantile(0.95, sum by (le) (rate(prediction_latency_seconds_bucket[5m])))", "legendFormat": "p95"}],
+      "fieldConfig": {"defaults": {"unit": "s", "color": {"mode": "palette-classic"}}}
+    },
+    {"id": 8, "type": "row", "title": "Host resources (correlate spikes with traffic above)", "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13}, "collapsed": false, "panels": []},
+    {
+      "id": 9,
+      "title": "CPU usage (%)",
+      "description": "Linear scale, 0–100. Sustained > 85% triggers HighCPU.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 14},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)", "legendFormat": "{{instance}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 10,
+      "title": "Memory usage (%)",
+      "description": "Linear scale, 0–100. Sustained > 90% triggers HighMemory.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 14},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100", "legendFormat": "{{instance}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 11,
+      "title": "Disk usage % — rootfs",
+      "description": "Linear scale, 0–100. > 85% warns, > 95% criticals.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 14},
+      "targets": [{"refId": "A", "datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "(1 - (node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"})) * 100", "legendFormat": "{{instance}} {{mountpoint}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "color": {"mode": "palette-classic"}}}
+    },
+    {"id": 12, "type": "row", "title": "Currently firing alerts", "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21}, "collapsed": false, "panels": []},
+    {
+      "id": 13,
+      "title": "Firing alerts (from Prometheus ALERTS series)",
+      "description": "Each row is an alert in the firing state. Source is Prometheus's own ALERTS{alertstate=\"firing\"} metric — no separate Alertmanager datasource needed.",
+      "type": "table",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "Value": true, "__name__": true, "instance": true, "job": true, "service": true}}}
+      ],
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "left"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "severity"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"critical": {"color": "red"}, "warning": {"color": "orange"}}}]}]}
+        ]
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["mlops", "overview"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Reversion — Overview",
+  "uid": "reversion-overview",
+  "version": 1,
+  "weekStart": ""
+}

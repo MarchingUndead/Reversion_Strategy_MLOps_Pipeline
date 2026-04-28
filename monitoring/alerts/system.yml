@@ -1,0 +1,57 @@
+groups:
+  - name: system
+    interval: 30s
+    rules:
+      - alert: HighCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+          area: system
+        annotations:
+          summary: "CPU > 85% on {{ $labels.instance }}"
+          description: "{{ printf \"%.1f\" $value }}% CPU sustained for 5m."
+
+      - alert: HighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          area: system
+        annotations:
+          summary: "Memory > 90% on {{ $labels.instance }}"
+          description: "{{ printf \"%.1f\" $value }}% memory used."
+
+      - alert: DiskFillingUp
+        expr: |
+          (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"}
+                / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          area: system
+        annotations:
+          summary: "Disk > 85% on {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "{{ printf \"%.1f\" $value }}% disk used."
+
+      - alert: DiskCritical
+        expr: |
+          (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"}
+                / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}) * 100 > 95
+        for: 5m
+        labels:
+          severity: critical
+          area: system
+        annotations:
+          summary: "Disk CRITICAL > 95% on {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "{{ printf \"%.1f\" $value }}% disk used — imminent failure."
+
+      - alert: HighLoad
+        expr: node_load5 > 2 * count without (cpu, mode) (node_cpu_seconds_total{mode="idle"})
+        for: 10m
+        labels:
+          severity: warning
+          area: system
+        annotations:
+          summary: "Load5 > 2x CPU count on {{ $labels.instance }}"
+          description: "5-minute load average exceeds 2x available CPUs."

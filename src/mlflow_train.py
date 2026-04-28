@@ -9,8 +9,6 @@ Skeleton scope: position 0 only. One MLflow run per invocation.
 from __future__ import annotations
 
 import argparse
-import contextlib
-import os
 import sys
 from pathlib import Path
 
@@ -19,15 +17,14 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-import numpy as np
 import mlflow
-import mlflow.sklearn
 
 SRC  = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import model as M
+from mlflow_utils import compute_head_metrics, log_three_heads, start_run
 
 
 def main() -> None:
@@ -48,16 +45,7 @@ def main() -> None:
     val    = M.split_events(events, "val")
     print(f"train={len(train)}  val={len(val)}")
 
-    if mlflow.active_run() is None:
-        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or f"file:{(ROOT / 'mlruns').as_posix()}"
-        experiment   = os.environ.get("MLFLOW_EXPERIMENT_NAME", "reversion-skeleton")
-        mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment(experiment)
-        run_ctx = mlflow.start_run()
-    else:
-        run_ctx = contextlib.nullcontext(mlflow.active_run())
-
-    with run_ctx:
+    with start_run("reversion-grid", tracking_root=ROOT / "mlruns"):
         mlflow.log_params({
             "rf_n_estimators": args.rf_n_estimators,
             "rf_max_depth":    args.rf_max_depth,
@@ -71,30 +59,18 @@ def main() -> None:
         clf, reg_dur, reg_rev = trio
 
         eval_df = M.evaluate(val, position, feature_cols, {position: trio})
-        metrics = M.eval_metrics(eval_df)
-
-        rmse_duration = float(np.sqrt(np.mean((eval_df["duration_sec"] - eval_df["pred_dur"]) ** 2)))
-        rmse_revert   = float(np.sqrt(np.mean((eval_df["revert_delta"] - eval_df["pred_rev"]) ** 2)))
-
-        mlflow.log_metrics({
-            "n_test":        float(metrics["n_test"]),
-            "accuracy":      metrics["accuracy"],
-            "f1_macro":      metrics["f1_macro"],
-            "mae_duration":  metrics["mae_duration"],
-            "mae_revert":    metrics["mae_revert"],
-            "rmse_duration": rmse_duration,
-            "rmse_revert":   rmse_revert,
-        })
+        mlflow.log_metrics(compute_head_metrics(
+            eval_df["klass"],        eval_df["pred_klass"],
+            eval_df["duration_sec"], eval_df["pred_dur"],
+            eval_df["revert_delta"], eval_df["pred_rev"],
+        ))
 
         sample_path = ROOT / "mlflow_tmp_sample_predictions.csv"
         eval_df.head(200).to_csv(sample_path, index=False)
         mlflow.log_artifact(str(sample_path), artifact_path="predictions")
         sample_path.unlink(missing_ok=True)
 
-        mlflow.sklearn.log_model(clf,     artifact_path="model_classifier")
-        mlflow.sklearn.log_model(reg_dur, artifact_path="model_duration")
-        mlflow.sklearn.log_model(reg_rev, artifact_path="model_revert")
-
+        log_three_heads(clf, reg_dur, reg_rev)
         print("logged run:", mlflow.active_run().info.run_id)
 
 
