@@ -1,0 +1,81 @@
+%% Reversion Strategy MLOps Pipeline — service topology.
+%% Render: mmdc -i report/figures/architecture.mmd -o report/images/architecture.png -w 1800
+%% Or paste into https://mermaid.live and export PNG.
+
+flowchart TB
+    classDef appimg fill:#e3f2fd,stroke:#1565c0,stroke-width:1px
+    classDef upstream fill:#fff8e1,stroke:#f57c00,stroke-width:1px
+    classDef store fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px
+    classDef ext fill:#fce4ec,stroke:#ad1457,stroke-width:1px
+
+    User([Browser / CLI])
+
+    subgraph Stack["docker compose stack"]
+        direction TB
+
+        subgraph App["reversion:local image (one Dockerfile, six entrypoints)"]
+            direction TB
+            ST["Streamlit<br/>:8501<br/>tab1=events+models<br/>tab2=backtest viewer<br/>tab3=direct prediction"]:::appimg
+            MUI["MLflow UI<br/>:5000"]:::appimg
+            FS["FastAPI serving<br/>:5002<br/>predict_proba<br/>+ /metrics"]:::appimg
+            AW["Airflow webserver<br/>:8080"]:::appimg
+            ASch["Airflow scheduler<br/>(LocalExecutor)"]:::appimg
+            AI["Airflow init<br/>(one-shot)"]:::appimg
+        end
+
+        subgraph Up["upstream images"]
+            direction TB
+            PG[("Postgres :13<br/>airflow metadata")]:::upstream
+            PR["Prometheus :9090<br/>17 alert rules"]:::upstream
+            AM["Alertmanager :9093"]:::upstream
+            GR["Grafana :3000<br/>3 dashboards"]:::upstream
+            NE["node-exporter :9100"]:::upstream
+        end
+
+        subgraph Vol["host bind / named volumes"]
+            direction LR
+            ML[("./mlruns<br/>file backend<br/>+ registry")]:::store
+            LG[("airflow_logs<br/>named volume")]:::store
+            DT[("./data<br/>raw + processed<br/>+ events + backtest_logs")]:::store
+        end
+    end
+
+    Gmail["Gmail SMTP"]:::ext
+
+    %% UI flows
+    User -->|HTTP :8501| ST
+    User -->|HTTP :5000| MUI
+    User -->|HTTP :8080| AW
+    User -->|HTTP :3000| GR
+    User -->|HTTP :9090| PR
+    User -->|HTTP :9093| AM
+    User -->|HTTP :5002| FS
+
+    %% Inference path
+    ST -->|"HTTP /invocations<br/>(production path)"| FS
+    ST -.->|"in-process<br/>direct load"| ML
+    FS -->|load model| ML
+
+    %% Orchestration
+    AW --> PG
+    ASch --> PG
+    AI --> PG
+    ASch -->|writes runs<br/>+ register_best| ML
+    ASch -->|reads| DT
+    ASch -->|writes| DT
+    ASch --> LG
+    AW --> LG
+
+    %% MLflow UI
+    MUI --> ML
+
+    %% Observability
+    PR -->|scrape :5002/metrics| FS
+    PR -->|scrape :9100| NE
+    PR -->|alerts| AM
+    AM -->|SMTP STARTTLS| Gmail
+    GR -->|datasource query| PR
+
+    %% Smoke
+    ASch -.->|smoke_tests DAG| FS
+    ASch -.->|smoke_tests DAG| PR
