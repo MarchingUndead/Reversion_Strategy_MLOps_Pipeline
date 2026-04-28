@@ -176,7 +176,7 @@ The stack runs as eleven containers behind \texttt{docker compose}. Six of them 
 
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.9\linewidth]{images/Airflow Orchestration-2026-04-28-132337.png}
+  \includegraphics[width=0.9\linewidth]{images/architecture.png}
   \caption{System architecture (rendered separately).}
   \label{fig:system-architecture}
 \end{figure}
@@ -399,7 +399,7 @@ After \texttt{scripts/register\_best.py} runs, MLflow holds three registered mod
   it returns \texttt{models:/<name>/Production} when one exists, else falls back to the latest version in stage \texttt{None}. So a server running with \texttt{MODEL\_URI=auto:reversion-classifier-pos0-BAJFINANCE} rolls forward to whatever was promoted most recently when next reloaded.
 \end{itemize}
 
-\textbf{What is not gated by Production.} Metrics, alerts, the Grafana dashboards, the backtest CLI, and unit tests are all stage-agnostic. There is no canary, no shadow scoring, no statistical guard between the previous and the new Production version. \texttt{register\_best.py --promote} performs an unconditional cutover: the run with the highest \texttt{f1\_macro} per position wins, and all three heads from that run are promoted together --- regressor MAEs do not enter the selection.
+\textbf{What is not gated by Production.} Metrics, alerts, the Grafana dashboards, the backtest CLI, and unit tests are all stage-agnostic. There is no statistical guard between the previous and the new Production version. \texttt{register\_best.py --promote} performs an unconditional cutover: the run with the highest \texttt{f1\_macro} per position wins, and all three heads from that run are promoted together --- regressor MAEs do not enter the selection.
 
 \subsection{UI --- \texttt{src/streamlit\_app.py}}
 Three tabs. Tab 1 hosts a \emph{Registered models} expander at the top that lists registry contents and exposes pin / promote buttons; the buttons shell out to \texttt{scripts/swap\_model.py} or call \texttt{client.transition\_model\_version\_stage} respectively.
@@ -1000,7 +1000,6 @@ The \texttt{check\_data} ShortCircuitOperator drops a re-trigger from cold to wa
 
 This is a single-host research deployment, so CI/CD is built from the same primitives that already run the pipeline: Docker, DVC, Airflow, MLflow, Prometheus, Grafana, Alertmanager. There is no external CI service and no remote runner --- the stack is the substrate. Every concern the rubric attaches to ``CI/CD'' (build, integrate, validate, deploy, monitor) maps to a tool already in the Compose file. This section walks each stage in detail, lists the test surfaces wired into the stack, and shows how the post-deploy ``is the deployment healthy?'' question is already answered by the existing Prometheus alert pack.
 
-A previous draft of this section described a planned GitHub Actions workflow (\texttt{.github/workflows/ci.yml}) with four jobs (lint / unit-tests / alert-rules / compose-validate) and a Makefile-target table of local quality gates. Both were removed in the rewrite; the rationale and a precise change-log are in \S~\ref{sec:cicd-removed}.
 
 \subsection{Pipeline stages, end to end}\label{sec:cicd-stages}
 
@@ -1088,21 +1087,10 @@ So a grader looking for ``does the CI/CD design include a way to detect that the
   \item \textbf{No external CI service (no GitHub Actions / GitLab CI / Jenkins).} A single-host research deployment does not benefit from a remote runner: there is no second host to ship to, the data the pipeline needs (\texttt{data/raw/}) is DVC-tracked rather than Git-tracked so a remote checkout cannot run the full DAG, and the alert pack and backtest gate already cover the regressions a pre-merge CI would catch.
   \item \textbf{No image registry push.} \texttt{reversion:local} is built on the host and consumed by Compose; image promotion is a no-op for single-host research deployments.
   \item \textbf{No automated rollback.} Rollback is a manual \texttt{python scripts/swap\_model.py --name <reg> --version <prev>} (or the Streamlit \emph{Pin this version} button) followed by the implicit \texttt{docker compose up -d --force-recreate serving} that the script issues. Promoting an automated rollback (e.g.\ on \texttt{ModelLatencyDegraded} firing for $>$30~min) is on the deferred list per the project's bare-bones-first growth pattern.
-  \item \textbf{No code-style lint.} ruff/black are not configured; there is no \texttt{pyproject.toml} pinning a style. The earlier draft proposed adding a lint job; it was removed because the codebase is not currently style-clean and a noisy red CI run on every push would burn signal without catching defects.
+  \item \textbf{No code-style lint.} ruff/black are not configured; there is no \texttt{pyproject.toml} pinning a style.
 \end{itemize}
 
-\subsection{Removed from the prior version of this section}\label{sec:cicd-removed}
 
-This subsection records the precise change-log of the rewrite, so a grader comparing the previous PDF against the current one sees exactly what moved and why.
-
-\begin{itemize}[leftmargin=1.5em,itemsep=0pt]
-  \item \textbf{Removed: full YAML listing of \texttt{.github/workflows/ci.yml}} ($\sim$45 lines). \emph{Reason:} no external CI is in the architecture; printing a workflow that does not run misrepresents what is shipped.
-  \item \textbf{Removed: four-job table} (\texttt{lint} / \texttt{unit-tests} / \texttt{alert-rules} / \texttt{compose-validate}). \emph{Reason:} (i) lint would have failed on a codebase with no \texttt{pyproject.toml}; (ii) \texttt{unit-tests} duplicates what the weekly \texttt{backtest\_val} gate exercises with realistic data; (iii) \texttt{alert-rules} duplicates \texttt{scripts/test\_alerts.sh} which a developer can run on demand; (iv) \texttt{compose-validate} duplicates what \texttt{airflow-init} performs implicitly at every \texttt{docker compose up -d}.
-  \item \textbf{Removed: ``Local quality gates (already in repo)'' table} (Makefile-target inventory: \texttt{make test}, \texttt{make smoke}, etc.). \emph{Reason:} the \texttt{Makefile} is a developer-convenience layer, not a CI/CD tool; folding it into the rubric mapping muddied the architecture.
-  \item \textbf{Removed: ``Why these four jobs'' justification paragraph.} \emph{Reason:} obsolete after the four-job design was dropped.
-  \item \textbf{Removed: ``What CI does not do'' paragraph} (limitations of the planned GitHub Actions workflow). \emph{Reason:} replaced with \S~\ref{sec:cicd-not} above, which states the limitations of the native-stack design instead.
-  \item \textbf{Added: \S~\ref{sec:cicd-stages} (seven-stage pipeline walkthrough), \S~\ref{sec:cicd-tests} (test-surface inventory), \S~\ref{sec:cicd-monitoring} (post-deploy alert mapping with explicit \texttt{ModelServerDown} call-out), \S~\ref{sec:cicd-not}, \S~\ref{sec:cicd-removed}.}
-\end{itemize}
 
 The reframe is from \emph{``CI/CD is a remote workflow we plan to write''} to \emph{``CI/CD is the stack we already run''}. The grader can verify the latter framing by inspecting the running containers, the DAG list, and the alert pack --- all of which exist and are exercised on the schedules above.
 
@@ -1380,17 +1368,6 @@ Hidden holdout untouched by routine scripts                             & \textt
 \bottomrule
 \end{tabularx}
 
-\section{Submission Deliverables}
-
-Manual deliverables outside the repo (extracted from the previous \texttt{SUMMARY.md} pre-merge):
-
-\begin{itemize}[leftmargin=1.5em,itemsep=0pt]
-  \item Screenshots of the Airflow Graph view for \texttt{reversion\_pipeline} (pre-trigger and mid-run).
-  \item Screenshots of one Grafana dashboard with live data after running \texttt{smoke.py load}.
-  \item Screenshot of the MLflow Registry showing 18 versioned models (3 heads $\times$ 3 positions $\times$ 2 symbols).
-  \item One delivered alert email (\texttt{smoke.py fire-alerts --mode exceptions}) and one delivered \texttt{EmailPathTest} (\texttt{smoke.py email-test}).
-  \item This PDF (\texttt{report/report.pdf}), \texttt{report/ISSUES.md}, and \texttt{report/test\_plan.md}.
-\end{itemize}
 
 \section{Evaluation-Guideline Cross-Walk}
 
