@@ -111,24 +111,40 @@ def backtest(eval_df, label, trade_log_path=None):
     return trades
 
 
-def _load_models_mlflow(positions, stage="Production"):
-    """Load (clf, reg_dur, reg_rev) per position from the MLflow Registry.
+def _load_models_mlflow(positions, symbols, stage="Production"):
+    """Load (clf, reg_dur, reg_rev) per (symbol, position) from the MLflow Registry.
 
     External wrapper — does NOT modify model.py's pipeline functions. Returns
-    {position: trio_or_None}; a None means at least one head failed to load.
+    {(symbol, position): trio_or_None}; None means at least one head failed.
+
+    Resolves the version through MlflowClient and loads via runs:/<run_id>/...
+    rather than models:/<name>/<stage> to avoid MLflow writing the
+    registered_model_meta sidecar (fails on read-only mlruns mounts in the
+    airflow scheduler container).
     """
     import mlflow.sklearn
+    from mlflow import MlflowClient
+    client = MlflowClient()
     out = {}
-    for p in positions:
-        try:
-            clf     = mlflow.sklearn.load_model(f"models:/reversion-classifier-pos{p}/{stage}")
-            reg_dur = mlflow.sklearn.load_model(f"models:/reversion-duration-pos{p}/{stage}")
-            reg_rev = mlflow.sklearn.load_model(f"models:/reversion-revert-pos{p}/{stage}")
-            out[p] = (clf, reg_dur, reg_rev)
-        except Exception as exc:
-            print(f"[backtest] pos{p}: MLflow load failed "
-                  f"({type(exc).__name__}: {exc})")
-            out[p] = None
+    for sym in symbols:
+        for p in positions:
+            try:
+                trio = []
+                run_id = None
+                for head in ("classifier", "duration", "revert"):
+                    name = f"reversion-{head}-pos{p}-{sym}"
+                    vs = client.get_latest_versions(name, stages=[stage])
+                    if not vs:
+                        raise RuntimeError(f"no version of {name} in stage {stage}")
+                    v = vs[0]
+                    run_id = v.run_id
+                    trio.append(mlflow.sklearn.load_model(
+                        f"runs:/{v.run_id}/model_{head}"))
+                out[(sym, p)] = tuple(trio)
+            except Exception as exc:
+                print(f"[backtest] sym={sym} pos={p}: MLflow load failed "
+                      f"({type(exc).__name__}: {exc})")
+                out[(sym, p)] = None
     return out
 
 
@@ -160,26 +176,47 @@ if __name__ == "__main__":
 
     feature_cols = _cfg["model"]["feature_cols"]
     positions    = _cfg["backtest"]["positions"]
+    symbols      = _cfg["symbols"]
 
     # Load from MLflow Registry first; retrain in-process if requested or any head missing.
-    models = {} if args.retrain else _load_models_mlflow(positions, args.stage)
-    if args.retrain or any(models.get(p) is None for p in positions):
+    models = ({} if args.retrain
+              else _load_models_mlflow(positions, symbols, args.stage))
+    if args.retrain or any(models.get((s, p)) is None
+                           for s in symbols for p in positions):
         print("[backtest] training models in-process (--retrain or MLflow load failed)")
         train = split_events(events, "train")
-        models = {p: train_position(train, p, feature_cols) for p in positions}
+        models = {}
+        for s in symbols:
+            train_sym = train[train["symbol"] == s]
+            for p in positions:
+                models[(s, p)] = train_position(train_sym, p, feature_cols)
 
-    evals = {p: evaluate(eval_df, p, feature_cols, models) for p in positions}
+    # Evaluate per (symbol, position): pre-filter the eval df by symbol so
+    # evaluate() only sees rows for the model trained on that symbol. evaluate()
+    # itself is unchanged — it still filters by position internally.
+    evals = {}
+    for s in symbols:
+        eval_sym = eval_df[eval_df["symbol"] == s]
+        for p in positions:
+            trio = models.get((s, p))
+            if trio is None:
+                evals[(s, p)] = None
+                continue
+            evals[(s, p)] = evaluate(eval_sym, p, feature_cols, {p: trio})
 
     logs_dir = ROOT / "data" / "backtest_logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n=== backtest (split={args.split}) ===")
     all_trades = []
-    for p, label in zip(_cfg["backtest"]["positions"], _cfg["backtest"]["position_labels"]):
-        log_path = logs_dir / f"trades_position_{p}_{label}_{args.split}.csv"
-        t = backtest(evals.get(p), f"position={p} ({label})", trade_log_path=log_path)
-        if t is not None:
-            all_trades.append(t)
+    for s in symbols:
+        for p, label in zip(positions, _cfg["backtest"]["position_labels"]):
+            log_path = logs_dir / f"trades_{s}_position_{p}_{label}_{args.split}.csv"
+            t = backtest(evals.get((s, p)),
+                         f"sym={s} position={p} ({label})",
+                         trade_log_path=log_path)
+            if t is not None:
+                all_trades.append(t)
 
     if all_trades:
         combined = pd.concat(all_trades, ignore_index=True).sort_values("det_timestamp")

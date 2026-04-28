@@ -61,12 +61,14 @@ DEFAULT_ARGS = {
 # both rebuild from the same lists. Heavy ML imports stay out of DAG-parse time.
 _cfg = yaml.safe_load((PROJECT_ROOT / "config.yaml").read_text())
 _POSITIONS = _cfg["backtest"]["positions"]
+_SYMBOLS   = _cfg["symbols"]
 
 
 def _expand(model_type: str, spec: dict) -> list[dict]:
     return [
-        {"model": model_type, "position": p,
+        {"model": model_type, "position": p, "symbol": s,
          "n_estimators": n, "max_depth": d, "learning_rate": lr}
+        for s in _SYMBOLS
         for p in _POSITIONS
         for n in spec["n_estimators"]
         for d in spec["max_depth"]
@@ -155,13 +157,15 @@ with DAG(
             "python", "src/mlflow_grid.py",
             "--model",         combo["model"],
             "--position",      str(combo["position"]),
+            "--symbol",        combo["symbol"],
             "--n-estimators",  str(combo["n_estimators"]),
             "--max-depth",     str(combo["max_depth"]),
             "--learning-rate", str(combo["learning_rate"]),
             "--experiment",    "reversion-grid",
         ]
         subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
-        return f"{combo['model']}-pos{combo['position']}-n{combo['n_estimators']}-d{combo['max_depth']}"
+        return (f"{combo['model']}-{combo['symbol']}-pos{combo['position']}-"
+                f"n{combo['n_estimators']}-d{combo['max_depth']}")
 
     grid_search = run_grid_combo.expand(combo=GRID_COMBOS)
 

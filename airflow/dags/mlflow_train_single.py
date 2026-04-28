@@ -13,16 +13,18 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import yaml
 from airflow import DAG
 from airflow.models.param import Param
 from airflow.operators.bash import BashOperator
 
 PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", Path(__file__).resolve().parents[2]))
+_cfg = yaml.safe_load((PROJECT_ROOT / "config.yaml").read_text())
 
 
 with DAG(
     dag_id="mlflow_train_single",
-    description="Manual one-shot MLflow training run (rf or xgb, single position).",
+    description="Manual one-shot MLflow training run (rf or xgb, single (symbol, position)).",
     schedule=None,
     catchup=False,
     start_date=datetime(2026, 1, 1),
@@ -30,6 +32,7 @@ with DAG(
     tags=["reversion", "mlflow", "manual"],
     params={
         "model":         Param("rf",  type="string", enum=["rf", "xgb"]),
+        "symbol":        Param(_cfg["symbols"][0], type="string", enum=_cfg["symbols"]),
         "position":      Param(0,     type="integer", enum=[0, 1, 2]),
         "n_estimators":  Param(200,   type="integer"),
         "max_depth":     Param(10,    type="integer"),
@@ -43,6 +46,7 @@ with DAG(
         bash_command=(
             f"cd {PROJECT_ROOT} && python src/mlflow_grid.py "
             "--model {{ params.model }} "
+            "--symbol {{ params.symbol }} "
             "--position {{ params.position }} "
             "--n-estimators {{ params.n_estimators }} "
             "--max-depth {{ params.max_depth }} "

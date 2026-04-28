@@ -71,6 +71,20 @@ print(f"loading model from {MODEL_URI} ...")
 _model = mlflow.pyfunc.load_model(MODEL_URI)
 print("model loaded")
 
+# Additionally load via the sklearn flavor to access predict_proba.
+# The classifier's predict() returns string labels which the PREDICTION_SCORE
+# float-coercion observer skips, leaving the prediction-drift panels empty.
+# Observing max-class probability instead gives a value bounded in [0, 1] that
+# matches the existing histogram buckets and populates on every request.
+try:
+    import mlflow.sklearn
+    _sklearn_model = mlflow.sklearn.load_model(MODEL_URI)
+    _has_proba = hasattr(_sklearn_model, "predict_proba")
+    print(f"sklearn flavor loaded (predict_proba={_has_proba})")
+except Exception as exc:
+    print(f"sklearn load failed ({type(exc).__name__}: {exc}); proba instrumentation off")
+    _sklearn_model, _has_proba = None, False
+
 _READY = False
 
 
@@ -199,5 +213,11 @@ async def invocations(request: Request) -> JSONResponse:
         try:
             PREDICTION_SCORE.labels(endpoint="/invocations").observe(float(p))
         except (TypeError, ValueError):
+            pass
+    if _has_proba:
+        try:
+            for max_p in _sklearn_model.predict_proba(df).max(axis=1):
+                PREDICTION_SCORE.labels(endpoint="/invocations").observe(float(max_p))
+        except Exception:
             pass
     return JSONResponse({"predictions": preds})

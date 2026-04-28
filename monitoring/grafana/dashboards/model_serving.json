@@ -204,17 +204,96 @@
         }
       ],
       "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Prediction drift",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "title": "Prediction score — p50 / p95",
+      "description": "Quantiles of the prediction_score histogram over a 5m window. A drift in the median or tail is the fastest signal that the served model has started behaving differently. Only populates when serving a regressor head — classifier predictions are strings and are skipped by the histogram.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 37},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(prediction_score_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(prediction_score_bucket[5m])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "palette-classic"}}}
+    },
+    {
+      "id": 12,
+      "title": "Prediction score — distribution heatmap",
+      "description": "Full distribution of prediction_score over time. Y axis = bucket upper edge (0.0..1.0); cell intensity = rate of observations falling in that bucket. Look for the hottest band shifting up or down across the time axis — that's prediction drift in shape, not just quantile.",
+      "type": "heatmap",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 37},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (le) (rate(prediction_score_bucket[5m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": {"axisPlacement": "left", "unit": "short"},
+        "color": {"mode": "scheme", "scheme": "Spectral", "steps": 64, "exponent": 0.5},
+        "cellGap": 1,
+        "rowsFrame": {"layout": "auto"}
+      },
+      "fieldConfig": {"defaults": {"custom": {"scaleDistribution": {"type": "linear"}}}}
+    },
+    {
+      "id": 13,
+      "title": "Latency p95 — 5m vs 1h-ago baseline",
+      "description": "Mirror of the ModelLatencyDegraded alert: current 5m p95 alongside the p95 from one hour ago. When the blue line rises above 2x the orange line for 10m, the alert fires. Captures latency-side regression after a model swap.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 45},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(prediction_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95 — current 5m"
+        },
+        {
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(prediction_latency_seconds_bucket[1h] offset 1h)))",
+          "legendFormat": "p95 — 1h ago"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "color": {"mode": "palette-classic"}}}
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
-  "tags": ["mlops", "serving"],
+  "tags": ["mlops", "serving", "drift"],
   "templating": {"list": []},
   "time": {"from": "now-15m", "to": "now"},
   "timepicker": {},
   "timezone": "",
   "title": "Model Serving",
   "uid": "model-serving",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

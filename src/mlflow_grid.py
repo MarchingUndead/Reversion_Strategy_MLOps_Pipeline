@@ -19,6 +19,7 @@ Wrapper: scripts/grid_search.sh
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -103,6 +104,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["rf", "xgb"], default="rf")
     parser.add_argument("--position", type=int, default=0, choices=[0, 1, 2])
+    parser.add_argument("--symbol", required=True, choices=M._cfg["symbols"],
+                        help="Train a model specific to this symbol. "
+                             "Models are per-(symbol, position) — pooling across symbols "
+                             "is statistically wrong because microstructure differs.")
     parser.add_argument("--n-estimators", type=int, default=200)
     parser.add_argument("--max-depth", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=0.1,
@@ -120,11 +125,13 @@ def main():
     train  = M.split_events(events, "train")
     val    = M.split_events(events, "val")
 
-    train_sub = M._clean(train[train["position"] == args.position], feature_cols)
-    val_sub   = M._clean(val[val["position"]   == args.position], feature_cols)
+    sym_pos = (train["position"] == args.position) & (train["symbol"] == args.symbol)
+    val_sym_pos = (val["position"] == args.position) & (val["symbol"] == args.symbol)
+    train_sub = M._clean(train[sym_pos], feature_cols)
+    val_sub   = M._clean(val[val_sym_pos], feature_cols)
     if len(train_sub) < 30 or val_sub.empty:
         raise SystemExit(
-            f"position={args.position}: insufficient data "
+            f"symbol={args.symbol} position={args.position}: insufficient data "
             f"(train={len(train_sub)}, val={len(val_sub)})"
         )
 
@@ -151,10 +158,12 @@ def main():
         mlflow.set_tags({
             "model_type": args.model,
             "position":   str(args.position),
+            "symbol":     args.symbol,
         })
         mlflow.log_params({
             "model":         args.model,
             "position":      args.position,
+            "symbol":        args.symbol,
             "n_estimators":  args.n_estimators,
             "max_depth":     args.max_depth,
             "learning_rate": args.learning_rate if args.model == "xgb" else None,
@@ -179,6 +188,45 @@ def main():
         )
         mlflow.log_metrics(metrics)
 
+        # Sample predictions on real val rows — paired (input, predicted, actual).
+        # In-memory CSV via mlflow.log_text avoids temp files, which fail when
+        # ROOT (/opt/airflow/project/) is bind-mounted read-only in the
+        # airflow-scheduler container.
+        sample = val_sub.head(200).copy()
+        sample["pred_klass"] = pred_k[:200]
+        sample["pred_dur"]   = pred_dur[:200]
+        sample["pred_rev"]   = pred_rev[:200]
+        import io
+        _buf = io.StringIO()
+        sample.to_csv(_buf, index=False)
+        mlflow.log_text(_buf.getvalue(), "predictions/sample_predictions.csv")
+
+        # Synthetic example — fixed feature row across every run, so you can
+        # diff how (model_type, symbol, position, hp) shifts predictions on a
+        # known-shaped event. z=2.5 is just past the out_thresh (2.0) trigger.
+        synth_in = {
+            "det_z_score":    2.5,    "det_spread":     0.30,
+            "side":           1,      "dte":            10,
+            "bucket":         2,      "det_dist_std":   0.25,
+            "det_dist_count": 5000,   "det_fut_ltq":    100,
+            "det_oi_fut":     1500000, "det_ltq":       150,
+            "det_fut_ba":     0.10,   "det_eq_ba":      0.06,
+        }
+        synth_X = [[synth_in[c] for c in feature_cols]]
+        synth_k_raw = clf.predict(synth_X)
+        synth_k = (le.inverse_transform(synth_k_raw)
+                   if le is not None else synth_k_raw)
+        synth_doc = {
+            "note": ("Synthetic feature row, deterministic across runs. "
+                     "z=2.5 is just past out_thresh (2.0)."),
+            "trained_for": {"symbol": args.symbol, "position": args.position},
+            "input_features":          synth_in,
+            "predicted_klass":         str(synth_k[0]),
+            "predicted_duration_sec":  float(reg_dur.predict(synth_X)[0]),
+            "predicted_revert_delta":  float(reg_rev.predict(synth_X)[0]),
+        }
+        mlflow.log_dict(synth_doc, "predictions/synthetic_example.json")
+
         # For XGB, log the wrapper (model + label encoder) so consumers get
         # strings back. RF naturally returns strings; log it as-is.
         clf_to_log = (XGBStringClassifier(model=clf, label_encoder=le)
@@ -187,7 +235,7 @@ def main():
 
         run_id = mlflow.active_run().info.run_id
         lr_str = f"{args.learning_rate:g}" if args.model == "xgb" else "-"
-        print(f"[grid] model={args.model} pos={args.position} "
+        print(f"[grid] model={args.model} sym={args.symbol} pos={args.position} "
               f"n_est={args.n_estimators} max_depth={args.max_depth} lr={lr_str}  "
               f"f1={metrics['f1_macro']:.4f} acc={metrics['accuracy']:.4f} "
               f"mae_dur={metrics['mae_duration']:.1f} mae_rev={metrics['mae_revert']:.3f}  "
