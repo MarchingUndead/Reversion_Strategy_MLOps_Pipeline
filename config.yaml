@@ -24,6 +24,27 @@ test_contracts_extra: ["JAN", "FEB", "MAR"]
 
 buckets:      ["9:15:00", "10:00:00", "11:00:00", "12:00:00", "13:00:00", "14:00:00", "15:00:00"]
 
+# --- service ports ----------------------------------------------------------
+# Listening / connect ports for the FastAPI model server and the Streamlit UI.
+# `serve.host` is the hostname Streamlit uses to reach the model server: inside
+# the compose network it's the service name `serving`; from the host it's
+# `localhost`. `serve.bind_host` is what serve.py binds to (0.0.0.0 in
+# containers). Both serve.py and streamlit_app.py read these at startup.
+serve:
+  host:      serving
+  bind_host: 0.0.0.0
+  port:      5002
+  # Local path to the MLflow file store on this host. serve.py and
+  # streamlit_app.py construct artefact paths as
+  # <mlruns_path>/<experiment_id>/<run_id>/artifacts/<artifact>, bypassing
+  # the registry's stored absolute `source` field (which gets baked in as
+  # /opt/airflow/project/mlruns/... when runs are written from a container
+  # and breaks lookups from the Windows host).
+  mlruns_path: ./mlruns
+
+streamlit:
+  port: 8501
+
 schemas:
   fut: [day, time, fut_ltp, fut_ltq, oi_fut, fut_bidprice, fut_bidvol, fut_askprice, fut_askvol]
   eq:  [day, time, ltp, ltq, oi, eq_bidprice, eq_bidvol, eq_askprice, eq_askvol]
@@ -61,7 +82,7 @@ model:
   train_range:    ["2022-01", "2024-05"]
   val_range:      ["2024-06", "2024-12"]
   dev_test_range: ["2024-07", "2024-12"]
-  hidden_range:   ["2025-01", "2025-12"]
+  hidden_range:   ["2025-01", "2026-12"]
   # RF hyperparameters (consumed by train_position in src/model.py)
   rf_n_estimators:  200
   rf_max_depth:     10
@@ -74,11 +95,29 @@ backtest:
   order_size:      1          # 1 lot per trade
   txn_cost_rate:   0.0001     # 0.01% of notional, charged on each leg
 
-# --- model-architecture grid sweep --------------------------------------------
-# Cartesian product of (positions x model x n_estimators x max_depth x lr).
+# --- model registry resolution
+# Single source of truth for which MLflow Registry version backtest.py loads
+# per (symbol, position) cell. The integer version applies to all 3 heads
+# (classifier, duration, revert) of that cell — they came from the same
+# winning grid run, so they're versioned together.
+#
+
+#registry:
+#  versions:
+#    BAJFINANCE:
+#      0: 4    # near
+#      1: 4    # mid
+#      2: 4    # far
+#    RELIANCE:
+#      0: 4
+#      1: 4
+#      2: 4
+
+# --- model-architecture grid sweep 
+# (positions x model x n_estimators x max_depth x lr).
 # Consumed by the Airflow DAG (dynamic mapping). Currently the smallest
 # possible sweep: rf only, one hyperparam combo per position. With 3 positions
-# this yields 3 mapped tasks — completes in ~1 minute under the grid_search
+# this yields 3 mapped tasks — completes in approx 1 minute under the grid_search
 # pool. Scale up by lengthening the lists below or re-enabling xgb.
 grid:
   rf:

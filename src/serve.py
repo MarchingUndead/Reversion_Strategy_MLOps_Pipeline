@@ -8,7 +8,8 @@ Loads an MLflow-logged model via MODEL_URI and exposes:
 
 Run:
   $env:MODEL_URI = "runs:/<run_id>/model_classifier"
-  uvicorn src.serve:app --host 0.0.0.0 --port 5002
+  python src/serve.py                       # bind host/port read from config.yaml
+  uvicorn src.serve:app --host 0.0.0.0 --port 5002   # explicit override
 """
 from __future__ import annotations
 
@@ -221,3 +222,17 @@ async def invocations(request: Request) -> JSONResponse:
         except Exception:
             pass
     return JSONResponse({"predictions": preds})
+
+
+if __name__ == "__main__":
+    import uvicorn
+    import yaml
+
+    _cfg_path = Path(__file__).resolve().parents[1] / "config.yaml"
+    with open(_cfg_path) as _f:
+        _cfg = yaml.safe_load(_f)
+    _serve_cfg = _cfg.get("serve", {}) or {}
+    _bind_host = _serve_cfg.get("bind_host", "0.0.0.0")
+    _port = int(_serve_cfg.get("port", 5002))
+    print(f"[serve] launching uvicorn on {_bind_host}:{_port} (from config.yaml)")
+    uvicorn.run(app, host=_bind_host, port=_port)

@@ -14,7 +14,6 @@ app does not load pickles itself.
 from __future__ import annotations
 
 import datetime as _dt
-import os
 import sys
 from pathlib import Path
 
@@ -30,6 +29,10 @@ if str(SRC) not in sys.path:
 _cfg = yaml.safe_load(open(ROOT / "config.yaml"))
 FEATURE_COLS = _cfg["model"]["feature_cols"]
 MONTHS       = _cfg["months"]
+_SERVE_CFG   = _cfg.get("serve", {})
+SERVE_HOST   = _SERVE_CFG.get("host", "serving")
+SERVE_PORT   = int(_SERVE_CFG.get("port", 5002))
+SERVE_URL    = f"http://{SERVE_HOST}:{SERVE_PORT}"
 
 st.set_page_config(page_title="Reversion Strategy", layout="wide")
 st.title("Reversion Strategy")
@@ -37,13 +40,14 @@ st.title("Reversion Strategy")
 
 # ------------------------------ sidebar: registry / model swap ------------------------------
 def _ensure_mlflow_tracking():
-    """Set the tracking URI on the global mlflow module. Idempotent."""
+    """Set the tracking URI on the global mlflow module from config.yaml.
+    Reads `serve.mlruns_path` (default ./mlruns); relative paths resolve
+    against the repo root. Idempotent."""
     import mlflow
-    tracking_uri = (
-        os.environ.get("MLFLOW_TRACKING_URI")
-        or f"file:{(ROOT / 'mlruns').as_posix()}"
-    )
-    mlflow.set_tracking_uri(tracking_uri)
+    mlruns = Path(_cfg.get("serve", {}).get("mlruns_path", "./mlruns"))
+    if not mlruns.is_absolute():
+        mlruns = (ROOT / mlruns).resolve()
+    mlflow.set_tracking_uri(f"file:{mlruns.as_posix()}")
     return mlflow
 
 
@@ -148,13 +152,24 @@ with tab1:
                     except Exception as e:
                         st.error(f"promote failed: {type(e).__name__}: {e}")
 
-                st.caption("Currently served (FastAPI):")
+                st.caption("Currently served:")
                 try:
                     import requests as _rq
-                    h = _rq.get("http://serving:5002/health", timeout=3).json()
-                    st.code(h.get("model_uri", "?"))
+                    # FastAPI container exposes /health with the loaded model_uri.
+                    # Plain `mlflow models serve` only exposes /ping + /invocations,
+                    # so fall back to /ping to detect a host-launched CLI server.
+                    h = _rq.get(f"{SERVE_URL}/health", timeout=3)
+                    if h.status_code == 200:
+                        st.code(h.json().get("model_uri", "?"))
+                    else:
+                        p = _rq.get(f"{SERVE_URL}/ping", timeout=3)
+                        if p.status_code == 200:
+                            st.code(f"alive at {SERVE_URL} "
+                                    f"(mlflow CLI mode — model_uri not exposed)")
+                        else:
+                            st.caption("(serving endpoint unreachable)")
                 except Exception:
-                    st.caption("(serving container unreachable)")
+                    st.caption("(serving endpoint unreachable)")
 
     st.divider()
 
@@ -224,7 +239,7 @@ with tab2:
                     st.dataframe(combined, use_container_width=True, height=400)
 
 
-# ------------------------------ tab 3 ------------------------------
+# tab 3
 with tab3:
     st.header("Direct prediction")
     st.caption(

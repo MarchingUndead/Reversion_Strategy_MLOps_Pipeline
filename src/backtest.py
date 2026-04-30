@@ -111,14 +111,18 @@ def backtest(eval_df, label, trade_log_path=None):
     return trades
 
 
-def _load_models_mlflow(positions, symbols, stage="Production"):
+def _load_models_mlflow(positions, symbols, versions):
     """Load (clf, reg_dur, reg_rev) per (symbol, position) from the MLflow Registry.
 
-    External wrapper — does NOT modify model.py's pipeline functions. Returns
-    {(symbol, position): trio_or_None}; None means at least one head failed.
+    Versions sourced from config.yaml::registry.versions — one int per
+    (symbol, position) cell, applied to all 3 heads. Cells not listed (or
+    whose load fails) return None so the existing in-process retrain
+    fallback in main() can pick them up.
+
+    External wrapper — does NOT modify model.py's pipeline functions.
 
     Resolves the version through MlflowClient and loads via runs:/<run_id>/...
-    rather than models:/<name>/<stage> to avoid MLflow writing the
+    rather than models:/<name>/<version> to avoid MLflow writing the
     registered_model_meta sidecar (fails on read-only mlruns mounts in the
     airflow scheduler container).
     """
@@ -127,22 +131,25 @@ def _load_models_mlflow(positions, symbols, stage="Production"):
     client = MlflowClient()
     out = {}
     for sym in symbols:
+        sym_versions = versions.get(sym) or {}
         for p in positions:
+            v_num = sym_versions.get(p)
+            if v_num is None:
+                print(f"[backtest] sym={sym} pos={p}: not pinned in "
+                      f"config.registry.versions — will fall back to retrain")
+                out[(sym, p)] = None
+                continue
             try:
                 trio = []
-                run_id = None
                 for head in ("classifier", "duration", "revert"):
                     name = f"reversion-{head}-pos{p}-{sym}"
-                    vs = client.get_latest_versions(name, stages=[stage])
-                    if not vs:
-                        raise RuntimeError(f"no version of {name} in stage {stage}")
-                    v = vs[0]
-                    run_id = v.run_id
+                    v = client.get_model_version(name, str(v_num))
                     trio.append(mlflow.sklearn.load_model(
                         f"runs:/{v.run_id}/model_{head}"))
                 out[(sym, p)] = tuple(trio)
+                print(f"[backtest] sym={sym} pos={p}: loaded v{v_num}")
             except Exception as exc:
-                print(f"[backtest] sym={sym} pos={p}: MLflow load failed "
+                print(f"[backtest] sym={sym} pos={p}: load v{v_num} failed "
                       f"({type(exc).__name__}: {exc})")
                 out[(sym, p)] = None
     return out
@@ -160,9 +167,6 @@ if __name__ == "__main__":
                              "back into tuning decisions.")
     parser.add_argument("--retrain", action="store_true",
                         help="force in-process retraining instead of loading from MLflow Registry")
-    parser.add_argument("--stage", default="Production",
-                        help="MLflow Registry stage to load (default: Production). "
-                             "Ignored with --retrain.")
     parser.add_argument("--confirm-holdout", action="store_true",
                         help="required to backtest --split hidden (one-shot 2025 holdout).")
     args = parser.parse_args()
@@ -178,9 +182,16 @@ if __name__ == "__main__":
     positions    = _cfg["backtest"]["positions"]
     symbols      = _cfg["symbols"]
 
+    # Versions are pinned in config.yaml::registry.versions. Normalize YAML
+    # keys (which may load as either int or str depending on quoting) into
+    # {sym: {int(pos): int(version)}} before passing to the loader.
+    versions_raw = _cfg.get("registry", {}).get("versions", {}) or {}
+    versions = {sym: {int(p): int(v) for p, v in (cell or {}).items()}
+                for sym, cell in versions_raw.items()}
+
     # Load from MLflow Registry first; retrain in-process if requested or any head missing.
     models = ({} if args.retrain
-              else _load_models_mlflow(positions, symbols, args.stage))
+              else _load_models_mlflow(positions, symbols, versions))
     if args.retrain or any(models.get((s, p)) is None
                            for s in symbols for p in positions):
         print("[backtest] training models in-process (--retrain or MLflow load failed)")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -28,6 +29,24 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
+
+# MLflow's file-store registry writes meta.yaml updates via tempfile +
+# shutil.move. Inside the airflow-scheduler container, the rename always
+# crosses filesystems (Docker Desktop on Windows treats each bind mount as a
+# separate device), so shutil.move falls back to copy2 → copystat → os.utime,
+# and utime with explicit nanosecond timestamps fails with EPERM on the
+# Windows-mounted FS. The file copy itself succeeds; only the timestamp
+# preservation fails. MLflow's `last_updated_timestamp` lives inside the
+# meta.yaml content, not on the FS mtime, so swallowing this EPERM is
+# harmless. Patch is local to this script — applies for the duration of the
+# register run only.
+_orig_copystat = shutil.copystat
+def _tolerant_copystat(*args, **kwargs):
+    try:
+        _orig_copystat(*args, **kwargs)
+    except (OSError, PermissionError):
+        pass
+shutil.copystat = _tolerant_copystat
 
 import mlflow
 from mlflow import MlflowClient
@@ -112,9 +131,33 @@ def main():
                         raise
                     # name already exists — fine
 
+                # Symbol grouping tag on the registered model itself, so
+                # `search_registered_models("tags.symbol = 'X'")` returns all 9
+                # entries for that symbol. Position and head are deliberately
+                # NOT tagged — they're already in the registered name
+                # (`reversion-<head>-pos<pos>-<symbol>`) and parsing the name
+                # avoids tag/name divergence.
+                client.set_registered_model_tag(name=name, key="symbol", value=sym)
+
                 src = f"runs:/{run_id}/model_{head}"
                 mv = client.create_model_version(name=name, source=src, run_id=run_id)
                 print(f"  registered {name} v{mv.version}  <- {src}")
+
+                # Per-version provenance: hyperparameters + winning metric land on
+                # the version row in the UI so reviewers don't need to click into
+                # the source run to see what was registered.
+                version_tags = {
+                    "run_id":        str(run_id),
+                    "model_type":    str(model),
+                    "n_estimators":  str(params.get("n_estimators")),
+                    "max_depth":     str(params.get("max_depth")),
+                    "learning_rate": str(params.get("learning_rate")),
+                    args.metric:     f"{mvalue:.4f}",
+                }
+                for k, v in version_tags.items():
+                    client.set_model_version_tag(
+                        name=name, version=mv.version, key=k, value=v,
+                    )
 
                 if args.promote:
                     client.transition_model_version_stage(
